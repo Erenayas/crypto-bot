@@ -119,7 +119,14 @@ both the depth stream and the trade stream over one combined connection — see
 Queue-position fill model, inventory-skewed quoting, and markout-based adverse
 selection measurement — see [Lesson 4](docs/04-fills-and-strategy.md).
 
-**Headline result** (15 min of live BTCUSDT, ~1000 simulated fills): the
+**Best configuration found** (γ=50, max position 2× quote size, minimum edge
+1.25 bp): −2.318 bp at the 2 bp base maker fee, and **+0.191 bp with a 0.5 bp
+maker rebate** — the only profitable configuration in the project. Markout
+−0.070 bp, down from −0.838 bp: refusing to quote inside 1.25 bp of fair value
+almost eliminates adverse selection. Details and the two rules that looked
+sensible and failed are in [Lesson 4 §7](docs/04-fills-and-strategy.md).
+
+**Baseline result** (15 min of live BTCUSDT, ~1000 simulated fills): the
 strategy loses 3.04 bp of traded volume at Binance's 2 bp base maker fee, and
 1.03 bp even at zero fee. Markout is −0.89 bp, so nearly the entire gross loss
 is adverse selection. Inventory skew helps modestly (−1.069 → −0.968 bp from

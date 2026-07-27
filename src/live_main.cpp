@@ -115,10 +115,11 @@ public:
         : exec_(exec), mm_(mm), risk_(risk), dry_(dry) {}
 
     void set_position(Qty p) { position_ = p; }
+    void set_avg_entry(double e) { avg_entry_ = e; }
     Qty  position() const { return position_; }
 
     void on_book(const OrderBook& book, double sigma, std::int64_t book_ms) {
-        const Quote q = mm_.quote(book, position_, sigma);
+        const Quote q = mm_.quote(book, position_, sigma, avg_entry_);
         reconcile(Side::Buy, q.bid, q.bid_px, book_ms);
         reconcile(Side::Sell, q.ask, q.ask_px, book_ms);
     }
@@ -243,6 +244,7 @@ private:
     bool          dry_;
     LiveOrder     bid_, ask_;
     Qty           position_ = 0;
+    double        avg_entry_ = 0.0;
     std::uint64_t sent_     = 0;
     std::uint64_t rejected_ = 0;
 };
@@ -289,9 +291,15 @@ int main(int argc, char** argv) {
     mm.tick            = *parse_fixed("0.10");
     mm.size            = *parse_fixed("0.002");
     mm.max_position    = *parse_fixed("0.004");
+    mm.fee_bp          = 2.0;
     mm.base_half_ticks = 0.5;
     mm.gamma           = 50.0;
     mm.use_microprice  = true;
+    // Refuse to quote closer than 1.25bp to fair value. Below that the fills we
+    // get are dominated by traders who know something; above it we barely fill
+    // at all. Swept in docs/04 section 8 -- this is the measured optimum, not a
+    // guess, and it is the single largest strategy improvement in the project.
+    mm.min_edge_bp     = 1.25;
 
     rk.max_position   = mm.max_position;
     rk.max_order_size = mm.size;
@@ -312,11 +320,12 @@ int main(int argc, char** argv) {
             rk.max_position = mm.max_position;
         } else if (a == "--gamma" && i + 1 < argc) mm.gamma = std::atof(argv[++i]);
         else if (a == "--half" && i + 1 < argc) mm.base_half_ticks = std::atof(argv[++i]);
+        else if (a == "--min-edge-bp" && i + 1 < argc) mm.min_edge_bp = std::atof(argv[++i]);
         else if (a == "--max-drawdown" && i + 1 < argc) rk.max_drawdown = std::atof(argv[++i]);
         else {
             std::fprintf(stderr,
                          "usage: hftlive [--symbol btcusdt] [--live] [--check] [--size F]\n"
-                         "               [--flatten] [--flatten-on-exit]\n"
+                         "               [--flatten] [--flatten-on-exit] [--min-edge-bp F]\n"
                          "               [--max-pos F] [--gamma F] [--half F]\n"
                          "               [--max-drawdown F]\n");
             return 2;

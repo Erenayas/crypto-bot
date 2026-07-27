@@ -3,6 +3,7 @@
 #include "order_book.hpp"
 #include "price.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 
@@ -61,6 +62,15 @@ struct MMParams {
     double vol_coeff       = 0.0;   // widen proportionally to volatility
     double gamma           = 0.0;   // inventory risk aversion; 0 = no skew
     bool   use_microprice  = true;  // false => plain mid (the naive baseline)
+
+    // Minimum half-spread as basis points of price. Set this to (round-trip fee
+    // / 2) and every filled round trip covers its own fees by construction.
+    double min_edge_bp     = 0.0;
+
+    // Never quote the exit side of an open position below its cost basis plus
+    // the round-trip fee. See the warning in quote().
+    bool   breakeven_exit  = false;
+    double fee_bp          = 2.0;   // maker fee PER SIDE, for the breakeven line
 };
 
 // The quoting strategy.
@@ -71,16 +81,17 @@ struct MMParams {
 //   1. RESERVATION PRICE. Do not quote around fair value -- quote around fair
 //      value shifted AGAINST your inventory:
 //
-//          r = fair - q * gamma * sigma^2
+//          r = fair - q_norm * gamma * tick
 //
 //      Long inventory pushes r down, so both quotes move down, making us more
 //      likely to sell and less likely to buy. We give up a little expected
-//      spread to pull back toward flat. A-S derives this as the optimal
-//      trade-off; we normalise q by max_position so gamma is unitless.
+//      spread to pull back toward flat. A-S writes this as q*gamma*sigma^2,
+//      where the units cancel against gamma's own; ours is in TICKS, for the
+//      reason documented at the call site.
 //
 //   2. SPREAD WIDENS WITH VOLATILITY. A-S's optimal spread grows with
-//      gamma*sigma^2. Intuitively: volatility is when you get run over, so
-//      that is when you demand more compensation.
+//      volatility. Intuitively: volatility is when you get run over, so that is
+//      when you demand more compensation.
 //
 // Setting gamma = 0 and use_microprice = false gives the naive symmetric
 // market maker -- deliberately, so the two can be compared on identical data.
@@ -88,7 +99,9 @@ class MarketMaker {
 public:
     explicit MarketMaker(const MMParams& p) : p_(p) {}
 
-    Quote quote(const OrderBook& book, Qty position, double sigma) const {
+    // avg_entry is the cost basis of the current inventory (0 when flat).
+    Quote quote(const OrderBook& book, Qty position, double sigma,
+                double avg_entry = 0.0) const {
         Quote      q;
         const auto bb = book.best_bid();
         const auto ba = book.best_ask();
@@ -115,7 +128,14 @@ public:
         // quotes when inventory is at its limit".
         const double reservation = fair - q_norm * p_.gamma * tick_px;
 
-        const double half = (p_.base_half_ticks * tick_px) + (p_.vol_coeff * sigma);
+        double half = (p_.base_half_ticks * tick_px) + (p_.vol_coeff * sigma);
+
+        // A round trip pays the maker fee twice. Quoting closer than that to
+        // fair value means every completed round trip loses money on
+        // arithmetic alone, no matter how good the timing is.
+        if (p_.min_edge_bp > 0.0) {
+            half = std::max(half, fair * p_.min_edge_bp / 10000.0);
+        }
 
         Price bid_px = floor_to_tick(reservation - half, p_.tick);
         Price ask_px = ceil_to_tick(reservation + half, p_.tick);
@@ -125,6 +145,24 @@ public:
         // this strategy is built on. Cap at one tick inside the opposite touch.
         bid_px = std::min(bid_px, ba->px - p_.tick);
         ask_px = std::max(ask_px, bb->px + p_.tick);
+
+        // Never close an open position at a loss: hold the exit quote at or
+        // above (below) the cost basis plus the round-trip fee.
+        //
+        // WARNING, and it is the important part: this does not make losses go
+        // away, it converts them into INVENTORY. If the market moves against
+        // the position, the exit quote simply never fills and we carry the
+        // position indefinitely -- turning a small, closable loss into an open
+        // one with no bound. "Never take a loss" is how small losses become
+        // large ones. Measured in docs/04.
+        if (p_.breakeven_exit && position != 0 && avg_entry > 0.0) {
+            const double round_trip = avg_entry * (p_.fee_bp * 2.0) / 10000.0;
+            if (position > 0) {
+                ask_px = std::max(ask_px, ceil_to_tick(avg_entry + round_trip, p_.tick));
+            } else {
+                bid_px = std::min(bid_px, floor_to_tick(avg_entry - round_trip, p_.tick));
+            }
+        }
 
         // Hard inventory limits. Beyond them we quote only the side that
         // reduces the position -- the skew above is a preference, this is a

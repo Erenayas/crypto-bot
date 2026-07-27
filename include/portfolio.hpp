@@ -4,6 +4,7 @@
 #include "price.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <deque>
 
@@ -24,8 +25,32 @@ struct Portfolio {
     Qty           max_long  = 0;
     Qty           max_short = 0;
 
+    // Volume-weighted entry price of the CURRENT inventory, in quote currency.
+    // Needed by any rule that reasons about whether closing would be profitable;
+    // 0 when flat.
+    double        avg_entry = 0.0;
+
     void on_fill(const Fill& f, double maker_fee_rate) {
         const double notional = to_double(f.px) * to_double(f.qty);
+        const double px       = to_double(f.px);
+
+        const Qty signed_qty = f.side == Side::Buy ? f.qty : -f.qty;
+        const Qty new_pos    = position + signed_qty;
+
+        // Maintain the cost basis of the inventory we are carrying.
+        if (new_pos == 0) {
+            avg_entry = 0.0;  // flat: there is no inventory to have a basis
+        } else if (position == 0 || (position > 0) == (signed_qty > 0)) {
+            // Opening or adding: blend the new fill into the average.
+            const double held     = std::abs(to_double(position));
+            const double added    = to_double(f.qty);
+            avg_entry = (held * avg_entry + added * px) / (held + added);
+        } else if ((new_pos > 0) != (position > 0)) {
+            // Flipped through zero: the old basis is gone, this fill is the new one.
+            avg_entry = px;
+        }
+        // Reducing without flipping leaves the basis unchanged, which is what
+        // makes "am I closing at a profit?" a well-posed question.
 
         if (f.side == Side::Buy) {
             position += f.qty;

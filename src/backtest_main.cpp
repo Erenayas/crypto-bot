@@ -26,13 +26,16 @@ struct Config {
     double      maker_fee     = 0.0002;  // 2 bp, Binance USD-M base tier
     double      tick          = 0.10;    // BTCUSDT
     double      size          = 0.002;   // per quote
-    double      max_position  = 0.010;
-    double      gamma         = 1.0;
-    double      base_half     = 1.0;     // ticks
+    double      max_position  = 0.004;
+    double      gamma         = 50.0;
+    double      base_half     = 0.5;     // ticks
     double      vol_coeff     = 0.0;
     bool        microprice    = true;
     double      requote_ticks = 1.0;
     std::int64_t markout_ms   = 1000;
+    double      min_edge_bp   = 1.25;  // measured optimum, docs/04 section 8
+    bool        breakeven     = false;
+    std::int64_t min_requote_ms = 0;
 };
 
 class Backtester {
@@ -80,6 +83,13 @@ public:
     const std::string&    meta() const { return meta_; }
     double                last_mid() const { return last_mid_; }
     std::uint64_t         quoting_updates() const { return quoting_; }
+    // How much of the run was spent holding inventory. A "never close at a
+    // loss" rule shows up here first: it does not remove losses, it converts
+    // them into time spent holding.
+    double inventory_fraction() const {
+        return updates_ > 0 ? static_cast<double>(with_inventory_) / static_cast<double>(updates_)
+                            : 0.0;
+    }
     std::uint64_t         book_updates() const { return updates_; }
 
 private:
@@ -92,6 +102,9 @@ private:
         p.vol_coeff       = c.vol_coeff;
         p.gamma           = c.gamma;
         p.use_microprice  = c.microprice;
+        p.min_edge_bp     = c.min_edge_bp;
+        p.breakeven_exit  = c.breakeven;
+        p.fee_bp          = c.maker_fee * 10000.0;
         return p;
     }
 
@@ -109,6 +122,7 @@ private:
         if (!mid) return;
 
         ++updates_;
+        if (pf_.position != 0) ++with_inventory_;
         last_mid_ = *mid;
         vol_.update(*mid);
 
@@ -120,7 +134,15 @@ private:
         if (!vol_.ready()) return;  // don't trade on an unwarmed volatility estimate
         ++quoting_;
 
-        const Quote q         = mm_.quote(book, pf_.position, vol_.sigma());
+        // Requote rate limit. Every requote surrenders queue position, so
+        // "quote less often" is a real lever, not just a throttle.
+        if (cfg_.min_requote_ms > 0 && last_quote_ns_ != 0 &&
+            (ns - last_quote_ns_) < cfg_.min_requote_ms * 1'000'000) {
+            return;
+        }
+        last_quote_ns_ = ns;
+
+        const Quote q = mm_.quote(book, pf_.position, vol_.sigma(), pf_.avg_entry);
         const Price threshold = static_cast<Price>(cfg_.requote_ticks * static_cast<double>(mm_.params().tick));
 
         requote(Side::Buy, q.bid, q.bid_px, threshold, book);
@@ -157,8 +179,10 @@ private:
     std::vector<Fill>  fills_;
     std::string        meta_;
     double             last_mid_ = 0.0;
+    std::int64_t       last_quote_ns_ = 0;
     std::uint64_t      updates_  = 0;
     std::uint64_t      quoting_  = 0;
+    std::uint64_t      with_inventory_ = 0;
     std::FILE*         csv_      = nullptr;
 };
 
@@ -177,6 +201,9 @@ int main(int argc, char** argv) {
                      "  --max-pos F       hard inventory limit\n"
                      "  --fee F           maker fee rate (0.0002 = 2bp)\n"
                      "  --requote F       requote threshold in ticks\n"
+                     "  --min-edge-bp F   minimum half-spread, in bp of price\n"
+                     "  --breakeven 0|1   never quote an exit below cost basis\n"
+                     "  --min-requote-ms N  minimum gap between requotes\n"
                      "  --csv PATH        write the P&L curve\n");
         return 2;
     }
@@ -193,6 +220,9 @@ int main(int argc, char** argv) {
         else if (a == "--fee") cfg.maker_fee = next();
         else if (a == "--requote") cfg.requote_ticks = next();
         else if (a == "--markout-ms") cfg.markout_ms = static_cast<std::int64_t>(next());
+        else if (a == "--min-edge-bp") cfg.min_edge_bp = next();
+        else if (a == "--breakeven") cfg.breakeven = next() != 0.0;
+        else if (a == "--min-requote-ms") cfg.min_requote_ms = static_cast<std::int64_t>(next());
         else if (a == "--csv" && i + 1 < argc) cfg.csv = argv[++i];
         else {
             std::fprintf(stderr, "unknown option: %s\n", a.c_str());
@@ -224,6 +254,8 @@ int main(int argc, char** argv) {
         std::printf("  quotes placed %llu\n", (unsigned long long)bt.sim().placements());
         std::printf("  fills         %llu\n", (unsigned long long)pf.fills);
         std::printf("  volume        %.4f  (notional %.0f)\n", to_double(pf.volume), vol_notional);
+        std::printf("  time in mkt   %.1f%%   (fraction of updates with inventory)\n",
+                    bt.inventory_fraction() * 100.0);
         std::printf("  final pos     %+.4f   (max long %+.4f / max short %+.4f)\n",
                     to_double(pf.position), to_double(pf.max_long), to_double(pf.max_short));
         std::printf("\n");

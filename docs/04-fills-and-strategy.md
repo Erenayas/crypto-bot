@@ -236,7 +236,97 @@ backtest:
   That costs nothing but wall-clock time, and it is the first thing I would do
   with another day.
 
-## 7. The units bug that faked a result
+## 7. Minimum edge — the largest strategy improvement found
+
+The question that produced this: *"can it only close a trade once the profit
+exceeds the commission?"* Three plausible-sounding rules came out of it. Two
+were traps and one was the best result in the project, and only measurement
+separated them.
+
+### The rule that worked: refuse to quote too close to fair value
+
+`min_edge_bp` sets a floor on the half-spread as basis points of price. Swept at
+the 2 bp base maker fee:
+
+| min edge | fills | net (bp) | markout | time holding inventory |
+|---|---|---|---|---|
+| 0 (off) | 973 | −2.898 | −0.838 bp | 81% |
+| 0.5 bp | 713 | −2.731 | −0.661 bp | 71% |
+| 1.0 bp | 317 | −2.458 | −0.342 bp | 54% |
+| **1.25 bp** | 241 | **−2.318** | **−0.070 bp** | 64% |
+| 1.5 bp | 172 | −2.386 | +0.092 bp | 77% |
+| 2.0 bp | 56 | −3.873 | +0.577 bp | 95% |
+
+**Markout goes from −0.838 bp to −0.070 bp.** Adverse selection — the thing
+Lesson 0 named as the central problem and every measurement since has confirmed —
+is almost entirely eliminated by refusing to quote inside 1.25 bp of fair value.
+Gross P&L improves from −10.89 to −0.92 USDT: before fees, the strategy is now
+close to flat.
+
+And past 1.5 bp it collapses. Markout keeps improving (+0.577 at 2 bp: the fills
+you get out there are genuinely *good*) but you get 56 fills in 15 minutes
+instead of 973, and the losses that remain are no longer amortised over anything.
+
+**The edge is real, and it is inaccessible.** Quote tight and every fill is
+someone who knew more than you; quote wide and nobody trades with you. 1.25 bp
+is where those two curves cross, on this instrument, in this sample.
+
+### The first profitable configuration
+
+Same setting across fee tiers:
+
+| min edge | 2 bp fee | 1 bp fee | 0 bp fee | −0.5 bp rebate |
+|---|---|---|---|---|
+| 0 (off) | −2.898 | −1.894 | −0.891 | −0.389 |
+| 1.0 bp | −2.458 | −1.455 | −0.451 | **+0.051** |
+| **1.25 bp** | **−2.318** | **−1.314** | **−0.311** | **+0.191** |
+
+**+0.191 bp.** The only positive number the project ever produced, and it still
+needs a maker rebate to get there. The conclusion from §5 survives intact — this
+is a fee-tier business — but the strategy now clears the bar *when the fee
+structure allows it to*, which it previously did not at any tier.
+
+These are now the defaults.
+
+### The trap: "never close at a loss"
+
+The most natural reading of the original question — hold the exit quote at or
+above the position's cost basis plus fees — is implemented as `--breakeven 1`.
+It is off by default, and here is why:
+
+| | fills | net (bp) | markout | time holding inventory |
+|---|---|---|---|---|
+| off | 973 | −2.898 | −0.838 bp | 81% |
+| **on** | **9** | **−18.926** | −1.464 bp | **97.6%** |
+
+Nine fills in fifteen minutes, and 97.6% of the run spent holding inventory.
+
+The absolute loss is smaller (−1.97 vs −35.44 USDT) purely because it barely
+trades. Per unit of risk taken it is **six times worse**, and markout gets worse
+too, because the positions it refuses to close are exactly the ones the market
+has already moved against.
+
+**The rule does not remove losses. It converts them into inventory.** When the
+market moves against you, the exit quote simply never fills, and a small
+closable loss becomes an open-ended one. "Never take a loss" is the mechanism by
+which small losses become large ones — and `time in market` is the column where
+it shows up first, which is why the backtester now reports it.
+
+### The other trap: quoting more slowly
+
+| min gap between requotes | fills | net (bp) | markout |
+|---|---|---|---|
+| 0 | 317 | −2.458 | −0.342 bp |
+| 1 s | 345 | −2.663 | −0.490 bp |
+| 3 s | 242 | −2.709 | −0.531 bp |
+
+Slowing down makes it *worse* once a minimum edge is in place. Stale quotes are
+adversely selected quotes: the longer a price sits unrevised, the more likely it
+is that the market has moved and you are the last one offering it. Requoting has
+a cost in queue position, but not requoting has a cost in getting picked off,
+and here the second is larger.
+
+## 8. The units bug that faked a result
 
 Worth recording in full, because the failure mode is more instructive than the
 fix.

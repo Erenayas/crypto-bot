@@ -509,6 +509,83 @@ static void test_quotes_never_cross() {
     CHECK(q.bid_px < q.ask_px);
 }
 
+static void test_min_edge_and_breakeven() {
+    std::printf("test_min_edge_and_breakeven\n");
+
+    MMParams p;
+    p.tick            = *parse_fixed("0.10");
+    p.size            = *parse_fixed("0.002");
+    p.max_position    = *parse_fixed("0.004");
+    p.base_half_ticks = 0.5;
+    p.gamma           = 0.0;
+    p.use_microprice  = false;
+    p.fee_bp          = 2.0;
+
+    OrderBook book;
+    book.apply_bid(*parse_fixed("65000.00"), *parse_fixed("10"));
+    book.apply_ask(*parse_fixed("65000.10"), *parse_fixed("10"));
+    const double mid = *book.mid();
+
+    // Without a minimum edge, the half-spread is half a tick: five cents.
+    const Quote tight = MarketMaker(p).quote(book, 0, 0.0);
+    CHECK(mid - to_double(tight.bid_px) < 1.0);
+
+    // 1.25bp of 65,000 is about 8.13, so both quotes must move at least that
+    // far from fair value. This is the parameter that fixed adverse selection:
+    // markout went from -0.838bp to -0.070bp in the sweep.
+    p.min_edge_bp = 1.25;
+    const Quote wide = MarketMaker(p).quote(book, 0, 0.0);
+    const double want = mid * 1.25 / 10000.0;
+    CHECK(mid - to_double(wide.bid_px) >= want - 0.11);   // within one tick of rounding
+    CHECK(to_double(wide.ask_px) - mid >= want - 0.11);
+    CHECK(wide.bid_px < tight.bid_px);
+    CHECK(wide.ask_px > tight.ask_px);
+
+    // Breakeven exit: long inventory bought at 64,000 must never be offered
+    // below 64,000 plus the round-trip fee, however far the market has fallen.
+    p.min_edge_bp    = 0.0;
+    p.breakeven_exit = true;
+    const double entry = 64000.0;
+    const Quote  held  = MarketMaker(p).quote(book, *parse_fixed("0.002"), 0.0, entry);
+    const double floor_px = entry + entry * (2.0 * p.fee_bp) / 10000.0;
+    CHECK(to_double(held.ask_px) >= floor_px);
+
+    // ...and with no inventory the rule must not touch the quotes at all.
+    const Quote flat = MarketMaker(p).quote(book, 0, 0.0, 0.0);
+    CHECK(flat.ask_px == tight.ask_px);
+}
+
+static void test_avg_entry_tracking() {
+    std::printf("test_avg_entry_tracking\n");
+
+    Portfolio pf;
+    CHECK(pf.avg_entry == 0.0);
+
+    pf.on_fill(Fill{Side::Buy, *parse_fixed("100.00"), *parse_fixed("1"), 1}, 0.0);
+    CHECK_NEAR(pf.avg_entry, 100.0, 1e-9);
+
+    // Adding to a position blends the basis.
+    pf.on_fill(Fill{Side::Buy, *parse_fixed("102.00"), *parse_fixed("1"), 2}, 0.0);
+    CHECK_NEAR(pf.avg_entry, 101.0, 1e-9);
+
+    // Reducing without flipping must LEAVE the basis alone -- otherwise
+    // "am I closing at a profit?" stops being a well-posed question.
+    pf.on_fill(Fill{Side::Sell, *parse_fixed("105.00"), *parse_fixed("1"), 3}, 0.0);
+    CHECK_NEAR(pf.avg_entry, 101.0, 1e-9);
+
+    // Going flat clears it.
+    pf.on_fill(Fill{Side::Sell, *parse_fixed("105.00"), *parse_fixed("1"), 4}, 0.0);
+    CHECK(pf.position == 0);
+    CHECK(pf.avg_entry == 0.0);
+
+    // Flipping through zero resets the basis to the new fill.
+    Portfolio f;
+    f.on_fill(Fill{Side::Buy, *parse_fixed("100.00"), *parse_fixed("1"), 1}, 0.0);
+    f.on_fill(Fill{Side::Sell, *parse_fixed("110.00"), *parse_fixed("3"), 2}, 0.0);
+    CHECK(f.position == -*parse_fixed("2"));
+    CHECK_NEAR(f.avg_entry, 110.0, 1e-9);
+}
+
 int main() {
     test_parse_fixed();
     test_order_book();
@@ -525,6 +602,8 @@ int main() {
     test_markout_detects_adverse_selection();
     test_inventory_skew();
     test_skew_is_scale_free();
+    test_min_edge_and_breakeven();
+    test_avg_entry_tracking();
     test_quotes_never_cross();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
