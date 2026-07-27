@@ -136,6 +136,8 @@ limitations are in [Lesson 4](docs/04-fills-and-strategy.md), not hidden.
 export BINANCE_API_KEY=...  BINANCE_API_SECRET=...   # testnet.binancefuture.com
 ./build/hftlive                  # dry run: quotes computed and logged, nothing sent
 ./build/hftlive --live           # places post-only orders on TESTNET
+./build/hftlive --live --flatten-on-exit   # also close the position when stopping
+./build/hftlive --flatten        # panic button: cancel everything, close position
 ```
 
 Testnet only, dry run by default, post-only (GTX) orders, and every order gated

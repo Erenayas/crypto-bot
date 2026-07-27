@@ -123,6 +123,27 @@ public:
         reconcile(Side::Sell, q.ask, q.ask_px, book_ms);
     }
 
+    // Cancel everything, then close any open position. Orders first: a resting
+    // quote that fills while the market order is in flight would leave us with
+    // a new position immediately after flattening.
+    void flatten_all() {
+        flatten_quotes();
+        if (dry_ || position_ == 0) return;
+
+        const Side side = position_ > 0 ? Side::Sell : Side::Buy;
+        const Qty  qty  = position_ > 0 ? position_ : -position_;
+        try {
+            std::fprintf(stderr, "[exec] flattening %s %s (market, reduce-only)\n",
+                         position_ > 0 ? "LONG" : "SHORT",
+                         format_fixed(qty, exec_.spec().qty_dp).c_str());
+            (void)exec_.close_position(side, qty, now_ms());
+            position_ = 0;
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "[exec] FLATTEN FAILED: %s\n", e.what());
+            std::fprintf(stderr, "[exec] *** POSITION STILL OPEN -- close it manually ***\n");
+        }
+    }
+
     void flatten_quotes() {
         if (!dry_) {
             try {
@@ -253,6 +274,8 @@ int main(int argc, char** argv) {
     std::string symbol = "btcusdt";
     bool        live   = false;
     bool        check  = false;
+    bool        flatten_only     = false;
+    bool        flatten_on_exit  = false;
     MMParams    mm;
     RiskConfig  rk;
 
@@ -272,6 +295,8 @@ int main(int argc, char** argv) {
         if (a == "--symbol" && i + 1 < argc) symbol = argv[++i];
         else if (a == "--live") live = true;
         else if (a == "--check") check = true;
+        else if (a == "--flatten") flatten_only = true;
+        else if (a == "--flatten-on-exit") flatten_on_exit = true;
         else if (a == "--size" && i + 1 < argc) {
             mm.size = *parse_fixed(argv[++i]);
             rk.max_order_size = mm.size;
@@ -284,6 +309,7 @@ int main(int argc, char** argv) {
         else {
             std::fprintf(stderr,
                          "usage: hftlive [--symbol btcusdt] [--live] [--check] [--size F]\n"
+                         "               [--flatten] [--flatten-on-exit]\n"
                          "               [--max-pos F] [--gamma F] [--half F]\n"
                          "               [--max-drawdown F]\n");
             return 2;
@@ -292,7 +318,7 @@ int main(int argc, char** argv) {
 
     load_env_file(".env");
     Credentials creds{env_or_empty("BINANCE_API_KEY"), env_or_empty("BINANCE_API_SECRET")};
-    if ((live || check) && (creds.api_key.empty() || creds.secret.empty())) {
+    if ((live || check || flatten_only) && (creds.api_key.empty() || creds.secret.empty())) {
         std::fprintf(stderr,
                      "--live needs BINANCE_API_KEY and BINANCE_API_SECRET.\n"
                      "Put them in a .env file in the project root (it is gitignored):\n"
@@ -337,7 +363,26 @@ int main(int argc, char** argv) {
         }
     }
 
-    LiveTrader trader(exec, mm, rk, !live);
+    LiveTrader trader(exec, mm, rk, !(live || flatten_only));
+
+    // Cancel everything and close the position, then exit. The panic button as
+    // a standalone command, for when the bot is already gone and something is
+    // still open.
+    if (flatten_only) {
+        try {
+            trader.set_position(poll_position(exec));
+            std::fprintf(stderr, "position before: %s\n",
+                         format_fixed(trader.position(), spec.qty_dp).c_str());
+            trader.flatten_all();
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            std::fprintf(stderr, "position after:  %s\n",
+                         format_fixed(poll_position(exec), spec.qty_dp).c_str());
+            return 0;
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "flatten failed: %s\n", e.what());
+            return 1;
+        }
+    }
 
     std::fprintf(stderr, "%s %s on TESTNET   size %s   max pos %s   gamma %.1f\n",
                  spec.symbol.c_str(), live ? "LIVE (orders will be placed)" : "DRY RUN",
@@ -423,7 +468,27 @@ int main(int argc, char** argv) {
     }
 
     // Never leave orders resting in a market you have stopped watching.
-    std::fprintf(stderr, "\nshutting down: cancelling all orders\n");
-    trader.flatten_quotes();
+    //
+    // Closing the POSITION is opt-in, because it is a genuinely different
+    // decision: it costs a taker fee and the spread, and a bot stopping is not
+    // always a reason to exit a position. Whichever you choose, choose it --
+    // the failure mode is leaving one open by accident.
+    if (flatten_on_exit) {
+        std::fprintf(stderr, "\nshutting down: cancelling orders and flattening position\n");
+        trader.set_position(poll_position(exec));
+        trader.flatten_all();
+    } else {
+        std::fprintf(stderr, "\nshutting down: cancelling all orders\n");
+        trader.flatten_quotes();
+        if (live) {
+            const Qty p = poll_position(exec);
+            if (p != 0) {
+                std::fprintf(stderr,
+                             "NOTE: position %s left OPEN. Use --flatten to close it, or\n"
+                             "      --flatten-on-exit next time.\n",
+                             format_fixed(p, spec.qty_dp).c_str());
+            }
+        }
+    }
     return 0;
 }

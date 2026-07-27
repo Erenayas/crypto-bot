@@ -50,6 +50,25 @@ public:
         return send("POST", "/fapi/v1/order", q, now_ms);
     }
 
+    // Close an open position with a MARKET order.
+    //
+    // This is deliberately a taker order: 2.5x the fee and we pay the spread.
+    // That cost is the point -- flattening is what you do when being flat
+    // matters more than the price you get for it. A passive exit can sit
+    // unfilled exactly when you most need to be out.
+    //
+    // reduceOnly=true is not optional. It guarantees the order can only SHRINK
+    // the position, never flip it. Without it, a position that moved between
+    // reading it and sending this order leaves you short instead of flat, which
+    // is a worse place than where you started.
+    std::string close_position(Side side, Qty qty, std::int64_t now_ms) {
+        const std::string q = "symbol=" + spec_.symbol +
+                              "&side=" + (side == Side::Buy ? "BUY" : "SELL") +
+                              "&type=MARKET&reduceOnly=true" +
+                              "&quantity=" + format_fixed(qty, spec_.qty_dp);
+        return send("POST", "/fapi/v1/order", q, now_ms);
+    }
+
     std::string cancel(std::int64_t order_id, std::int64_t now_ms) {
         return send("DELETE", "/fapi/v1/order",
                     "symbol=" + spec_.symbol + "&orderId=" + std::to_string(order_id), now_ms);

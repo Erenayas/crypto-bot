@@ -187,7 +187,57 @@ join the touch on BTCUSDT.** Binance offers a WebSocket order-entry API that
 would cut this substantially, and that is the correct next step — not more
 strategy tuning.
 
-## 9. A debugging note worth keeping
+## 9. Flattening, and what it costs
+
+`flatten_quotes()` cancels orders. Closing the **position** is a separate,
+opt-in decision:
+
+```bash
+./build/hftlive --live --flatten-on-exit   # close the position when stopping
+./build/hftlive --flatten                  # close it now and exit (panic button)
+```
+
+Opt-in because a bot stopping is not always a reason to exit a position, and
+exiting is not free. Whichever you choose, *choose it* — the failure mode is
+leaving one open by accident, which is exactly what happened on the first live
+session here.
+
+`reduceOnly=true` is not optional on the closing order. It guarantees the order
+can only shrink the position, never flip it. Without it, a position that moved
+between reading it and sending the order leaves you short instead of flat —
+worse than where you started.
+
+### The measured cost of flattening 0.160 BTC
+
+```
+17:52:58  SELL 0.0858 @ 64665.60  maker=false  commission 2.219
+17:52:58  SELL 0.0015 @ 64645.60  maker=false  commission 0.039
+17:52:58  SELL 0.0043 @ 64643.40  maker=false  commission 0.111
+17:52:58  SELL 0.0634 @ 64623.20  maker=false  commission 1.639
+```
+
+Three things in four lines:
+
+1. **Every fill is `maker=false`.** A market order is a taker order: ~4 bp of
+   commission here against 2 bp for maker. That is the price of certainty, and
+   the reason a passive exit is preferable when you have the luxury of time.
+2. **The order walked the book** — 64,665 down to 64,623, about 42 dollars of
+   slippage on one order. This is **market impact**, the thing the backtester
+   explicitly does not model ([Lesson 4 §6](04-fills-and-strategy.md)). Testnet
+   depth is thin so the effect is exaggerated, but the mechanism is real.
+3. **Total cost ~10.6 USDT** to exit a position that had accumulated over 90
+   seconds of quoting.
+
+The arc of that session, end to end: spread capture earned **+2.13**, the
+inventory it accumulated lost **−4.17**, and closing that inventory cost
+**−10.6**.
+
+**Accumulating inventory is cheap. Getting rid of it is expensive.** That
+asymmetry is the entire reason Avellaneda–Stoikov skews quotes against
+inventory — preventing accumulation costs a fraction of a tick, while cleaning
+it up afterwards costs the spread plus taker fees plus impact.
+
+## 10. A debugging note worth keeping
 
 The long recording initially failed the determinism check. It was not a bug in
 the replay engine — the recorder was **still writing the file**. Two passes read
@@ -197,7 +247,7 @@ Worth internalising because it generalises: when a deterministic system suddenly
 is not, question the *inputs* before the logic. The file was growing 25 KB every
 three seconds and `ls` showed it in two commands.
 
-## 10. Getting testnet keys
+## 11. Getting testnet keys
 
 ```bash
 # 1. Register at https://testnet.binancefuture.com (separate from the real account)
