@@ -16,6 +16,7 @@ with the reasoning behind it, not just the implementation.
 | 2 | Recorder + deterministic replay harness | ✅ [notes](docs/03-record-replay.md) |
 | 3 | Fill simulation, strategy, backtest | ✅ [notes](docs/04-fills-and-strategy.md) |
 | 4 | Live execution, signing, risk limits | ✅ [notes](docs/05-execution-and-risk.md) |
+| 5 | Strategy search: can anything beat the fee? | 🔄 [notes](docs/06-strategy-search.md) — grid untested at scale |
 
 ---
 
@@ -167,6 +168,18 @@ one that is right.
 
 The dashboard binds to `127.0.0.1` only: the process holds API credentials and
 has no business listening on a public interface.
+
+## Instrument screening
+
+```bash
+./tools/screen.py spread    # market-making view: is the spread wider than the fee?
+./tools/screen.py vol       # grid view: does price move enough per hour?
+```
+
+The two views disagree, and that is the point — see
+[Lesson 6](docs/06-strategy-search.md). BTCUSDT is hopeless for a market maker
+(0.02 bp spread against a 4 bp round-trip fee) and perfectly reasonable for a
+grid (47 bp hourly range).
 
 ## Debugging
 
