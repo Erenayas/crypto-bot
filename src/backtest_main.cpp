@@ -96,9 +96,16 @@ public:
 private:
     static MMParams make_params(const Config& c) {
         MMParams p;
-        p.tick            = *parse_fixed(std::to_string(c.tick));
-        p.size            = *parse_fixed(std::to_string(c.size));
-        p.max_position    = *parse_fixed(std::to_string(c.max_position));
+        // std::to_string on a double gives 6 decimals, which is not enough for
+        // ticks like DOGEUSDT's 0.00001 once you go smaller. Format exactly.
+        const auto fixed_of = [](double v) {
+            char b[64];
+            std::snprintf(b, sizeof b, "%.8f", v);
+            return *parse_fixed(b);
+        };
+        p.tick            = fixed_of(c.tick);
+        p.size            = fixed_of(c.size);
+        p.max_position    = fixed_of(c.max_position);
         p.base_half_ticks = c.base_half;
         p.vol_coeff       = c.vol_coeff;
         p.gamma           = c.gamma;
@@ -200,6 +207,7 @@ int main(int argc, char** argv) {
                      "  --half F          base half-spread in ticks\n"
                      "  --vol F           volatility coefficient\n"
                      "  --size F          quote size\n"
+                     "  --tick F          price tick size for the symbol\n"
                      "  --max-pos F       hard inventory limit\n"
                      "  --fee F           maker fee rate (0.0002 = 2bp)\n"
                      "  --requote F       requote threshold in ticks\n"
@@ -219,6 +227,7 @@ int main(int argc, char** argv) {
         else if (a == "--half") cfg.base_half = next();
         else if (a == "--vol") cfg.vol_coeff = next();
         else if (a == "--size") cfg.size = next();
+        else if (a == "--tick") cfg.tick = next();
         else if (a == "--max-pos") cfg.max_position = next();
         else if (a == "--fee") cfg.maker_fee = next();
         else if (a == "--requote") cfg.requote_ticks = next();
