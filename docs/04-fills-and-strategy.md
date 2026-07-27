@@ -89,21 +89,27 @@ adverse selection, finally measurable.
 ## 3. The strategy
 
 Avellaneda–Stoikov reduced to the two ideas that carry the weight, with
-dimensionless parameters:
+parameters made scale-free so they can be tuned:
 
 **Reservation price.** Don't quote around fair value — quote around fair value
 shifted *against* your inventory:
 
 ```
-r = fair − q · γ · σ²
+r = fair − q_norm · γ · tick
 ```
 
 Long inventory pushes `r` down, moving both quotes down, making us more likely
 to sell and less likely to buy. We give up a little expected spread to pull back
 toward flat.
 
-**Spread widens with volatility.** A-S's optimal spread grows with `γσ²`.
+A-S writes this term as `q·γ·σ²`, where the units cancel against γ's own. Ours
+is expressed in **ticks** — γ means "how many ticks to shift the quotes at full
+inventory" — because normalising `q` and making γ dimensionless breaks that
+cancellation. §7 covers what happened when it did not.
+
+**Spread widens with volatility.** A-S's optimal spread grows with volatility.
 Volatility is when you get run over, so that is when you demand compensation.
+(`vol_coeff`, off by default in these runs.)
 
 Plus two things A-S doesn't give you but reality demands: hard inventory limits
 (stop quoting the side that makes it worse), and never crossing the book (a
@@ -156,23 +162,23 @@ one-sided.
 
 | half-spread | fills | net (bp) |
 |---|---|---|
-| 0.5 tick | 1012 | −0.816 |
-| 1 tick | 1015 | −0.817 |
-| 2 tick | 979 | −0.829 |
-| 4 tick | 976 | −0.819 |
-| 8 tick | 945 | −0.813 |
+| 0.5 tick | 1309 | −1.031 |
+| 1 tick | 1292 | −1.034 |
+| 2 tick | 1245 | −1.039 |
+| 4 tick | 1182 | −1.018 |
+| 8 tick | 1144 | −0.976 |
 
-Flat within noise across a 16× range. See finding 3 below.
+Flat within noise across a 16× range. See finding 4 below.
 
 ## 5. What this actually means
 
 **It loses money.** That is the correct result, it is what Lesson 0 predicted
 from arithmetic alone, and it is worth more than a backtest that "worked".
 
-Three findings, in order of importance:
+Four findings, in order of importance:
 
 **1. This is a fee-tier problem before it is a strategy problem.** The whole
-range from −2.82 bp to −0.31 bp is driven by the fee, not by anything the
+range from −3.04 bp to −0.53 bp is driven by the fee, not by anything the
 strategy does. BTCUSDT's book sits at a one-tick spread — about 0.15 bp round
 trip — while the base maker fee is 2 bp *per side*. **You cannot capture 0.15 bp
 and pay 4 bp.** Real market makers on this venue operate at VIP tiers where the
