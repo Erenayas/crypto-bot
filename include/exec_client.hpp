@@ -74,6 +74,19 @@ public:
         return send("GET", "/fapi/v2/positionRisk", "symbol=" + spec_.symbol, now_ms);
     }
 
+    // Executed fills. This is the only authoritative record of what the bot
+    // actually did -- the console log shows what we INTENDED, and the two
+    // differ every time an order is rejected, partially filled, or filled after
+    // we thought we had cancelled it.
+    std::string user_trades(int limit, std::int64_t now_ms) {
+        return send("GET", "/fapi/v1/userTrades",
+                    "symbol=" + spec_.symbol + "&limit=" + std::to_string(limit), now_ms);
+    }
+
+    std::string balance(std::int64_t now_ms) {
+        return send("GET", "/fapi/v2/balance", "", now_ms);
+    }
+
     const SymbolSpec& spec() const { return spec_; }
 
 private:

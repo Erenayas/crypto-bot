@@ -66,5 +66,11 @@ add_test(NAME recording COMMAND test_recording)
 add_executable(hftlive src/live_main.cpp)
 target_link_libraries(hftlive PRIVATE hft_core hft_net simdjson::simdjson)
 
+add_executable(hftstatus tools/status.cpp)
+target_link_libraries(hftstatus PRIVATE hft_core hft_net simdjson::simdjson)
+
+add_executable(hftdash tools/dashboard.cpp)
+target_link_libraries(hftdash PRIVATE hft_core hft_net simdjson::simdjson Boost::headers)
+
 add_executable(wsdump tools/wsdump.cpp)
 target_link_libraries(wsdump PRIVATE hft_core hft_net)

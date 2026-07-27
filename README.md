@@ -142,6 +142,23 @@ Testnet only, dry run by default, post-only (GTX) orders, and every order gated
 by position / rate / staleness / drawdown checks — see
 [Lesson 5](docs/05-execution-and-risk.md).
 
+## Monitoring
+
+```bash
+./build/hftdash                  # web dashboard on http://127.0.0.1:8080
+./build/hftstatus --watch        # same thing in the terminal
+```
+
+![dashboard](docs/dashboard.png)
+
+Every figure is queried from the exchange on each refresh, not from the bot's
+own bookkeeping — P&L, ROI, fill count, maker/taker split, commission in bp,
+open orders and recent fills. When the bot's log and this disagree, this is the
+one that is right.
+
+The dashboard binds to `127.0.0.1` only: the process holds API credentials and
+has no business listening on a public interface.
+
 ## Debugging
 
 ```bash
