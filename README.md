@@ -120,10 +120,11 @@ Queue-position fill model, inventory-skewed quoting, and markout-based adverse
 selection measurement — see [Lesson 4](docs/04-fills-and-strategy.md).
 
 **Headline result** (15 min of live BTCUSDT, ~1000 simulated fills): the
-strategy loses 2.82 bp of traded volume at Binance's 2 bp base maker fee, and
-0.82 bp even at zero fee. Markout is −0.79 bp, so nearly the entire gross loss
-is adverse selection. Inventory skew helps monotonically (−1.07 bp at γ=0 →
-−0.71 bp at γ=20); half-spread does essentially nothing across a 16× range.
+strategy loses 3.04 bp of traded volume at Binance's 2 bp base maker fee, and
+1.03 bp even at zero fee. Markout is −0.89 bp, so nearly the entire gross loss
+is adverse selection. Inventory skew helps modestly (−1.069 → −0.968 bp from
+γ=0 to γ=20, and halves peak inventory); half-spread does essentially nothing
+across a 16× range.
 
 On a one-tick-spread instrument this is a **fee-tier problem before it is a
 strategy problem** — you cannot capture 0.15 bp and pay 4 bp. Caveats and

@@ -83,6 +83,19 @@ void load_env_file(const std::string& path) {
     std::fclose(f);
 }
 
+// The exchange's own clock. Binance rejects requests whose timestamp is outside
+// recvWindow, and a drifting local clock produces an error that reads like a
+// signature problem.
+std::int64_t server_time() {
+    const std::string      json = https_get(kRestHost, "/fapi/v1/time");
+    simdjson::dom::parser  p;
+    simdjson::dom::element d;
+    if (p.parse(json.data(), json.size()).get(d)) return 0;
+    std::int64_t t = 0;
+    if (d["serverTime"].get(t)) return 0;
+    return t;
+}
+
 std::int64_t now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::system_clock::now().time_since_epoch())
@@ -239,6 +252,7 @@ Qty poll_position(ExecClient& exec) {
 int main(int argc, char** argv) {
     std::string symbol = "btcusdt";
     bool        live   = false;
+    bool        check  = false;
     MMParams    mm;
     RiskConfig  rk;
 
@@ -257,6 +271,7 @@ int main(int argc, char** argv) {
         const std::string a = argv[i];
         if (a == "--symbol" && i + 1 < argc) symbol = argv[++i];
         else if (a == "--live") live = true;
+        else if (a == "--check") check = true;
         else if (a == "--size" && i + 1 < argc) {
             mm.size = *parse_fixed(argv[++i]);
             rk.max_order_size = mm.size;
@@ -268,7 +283,7 @@ int main(int argc, char** argv) {
         else if (a == "--max-drawdown" && i + 1 < argc) rk.max_drawdown = std::atof(argv[++i]);
         else {
             std::fprintf(stderr,
-                         "usage: hftlive [--symbol btcusdt] [--live] [--size F]\n"
+                         "usage: hftlive [--symbol btcusdt] [--live] [--check] [--size F]\n"
                          "               [--max-pos F] [--gamma F] [--half F]\n"
                          "               [--max-drawdown F]\n");
             return 2;
@@ -277,7 +292,7 @@ int main(int argc, char** argv) {
 
     load_env_file(".env");
     Credentials creds{env_or_empty("BINANCE_API_KEY"), env_or_empty("BINANCE_API_SECRET")};
-    if (live && (creds.api_key.empty() || creds.secret.empty())) {
+    if ((live || check) && (creds.api_key.empty() || creds.secret.empty())) {
         std::fprintf(stderr,
                      "--live needs BINANCE_API_KEY and BINANCE_API_SECRET.\n"
                      "Put them in a .env file in the project root (it is gitignored):\n"
@@ -294,6 +309,34 @@ int main(int argc, char** argv) {
     spec.tick = mm.tick;
 
     ExecClient exec(kRestHost, creds, spec);
+
+    // Credential check: signed but READ-ONLY. Verifies the key, the secret, the
+    // signing routine and the clock, without a single order reaching the book.
+    // Never debug authentication by placing orders -- a failed order tells you
+    // nothing about which of the four was wrong.
+    if (check) {
+        try {
+            std::fprintf(stderr, "checking credentials against %s ...\n", kRestHost);
+            const std::int64_t drift = now_ms() - server_time();
+            std::fprintf(stderr, "  clock drift    %+lld ms%s\n", (long long)drift,
+                         (drift > 1000 || drift < -1000) ? "   *** too large, fix NTP ***" : "  ok");
+
+            const std::string pos = exec.position_risk(now_ms());
+            std::fprintf(stderr, "  signed request OK\n");
+            std::fprintf(stderr, "  position       %s\n",
+                         format_fixed(poll_position(exec), spec.qty_dp).c_str());
+
+            const std::string open = exec.open_orders(now_ms());
+            std::fprintf(stderr, "  open orders    %s\n", open == "[]" ? "none" : open.c_str());
+            (void)pos;
+            std::fprintf(stderr, "\ncredentials work. safe to run --live\n");
+            return 0;
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "\nFAILED: %s\n", e.what());
+            return 1;
+        }
+    }
+
     LiveTrader trader(exec, mm, rk, !live);
 
     std::fprintf(stderr, "%s %s on TESTNET   size %s   max pos %s   gamma %.1f\n",

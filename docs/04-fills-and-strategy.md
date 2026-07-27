@@ -123,28 +123,34 @@ Over this window the market drifted **down** roughly 0.6% (65,590 → 65,185),
 with trade flow imbalance at −0.28. Keep that in mind reading the numbers: a
 market maker in a falling market accumulates longs and bleeds. See §6.
 
-### Varying only the fee (γ=5, half-spread 0.5 tick)
+### Varying only the fee (γ=2, half-spread 0.5 tick)
 
-| maker fee | fees paid | **net P&L** | net in bp | markout |
-|---|---|---|---|---|
-| 2.0 bp (base tier) | 25.49 | **−35.85** | −2.82 | −0.79 bp |
-| 1.0 bp | 12.75 | **−23.11** | −1.82 | −0.79 bp |
-| 0.0 bp | 0.00 | **−10.36** | −0.82 | −0.79 bp |
-| −0.5 bp (rebate) | −6.37 | **−3.99** | −0.31 | −0.79 bp |
-
-### Inventory skew — the one parameter that clearly works (fee = 0)
-
-| γ | fills | **net (bp)** | markout |
+| maker fee | **net P&L** | net in bp | markout |
 |---|---|---|---|
-| 0 (no skew) | 1251 | **−1.069** | −0.885 bp |
-| 1 | 1239 | **−0.942** | −0.830 bp |
-| 5 | 1012 | **−0.816** | −0.790 bp |
-| 20 | 814 | **−0.713** | −0.675 bp |
+| 2.0 bp (base tier) | **−49.08** | −3.04 | −0.89 bp |
+| 1.0 bp | **−32.87** | −2.04 | −0.89 bp |
+| 0.0 bp | **−16.65** | −1.03 | −0.89 bp |
+| −0.5 bp (rebate) | **−8.55** | −0.53 | −0.89 bp |
 
-Monotonic, in both P&L and markout. Avellaneda–Stoikov's reservation-price skew
-does exactly what the theory says: quoting away from inventory reduces both how
-much you accumulate and how badly you get selected against. This is the clearest
-positive result in the project.
+### Inventory skew (fee = 0, half-spread 0.5 tick)
+
+| γ (ticks at full inventory) | fills | **net (bp)** | max position | markout |
+|---|---|---|---|---|
+| 0 (no skew) | 1251 | −1.069 | 0.0080 | −0.885 bp |
+| 1 | 1309 | −1.028 | 0.0060 | −0.890 bp |
+| 2 | 1309 | −1.031 | 0.0060 | −0.885 bp |
+| 5 | 1299 | −1.008 | 0.0060 | −0.873 bp |
+| 10 | 1317 | −0.990 | 0.0070 | −0.860 bp |
+| 20 | 1274 | **−0.968** | 0.0040 | −0.853 bp |
+
+A **real but modest** effect: about 9% better net P&L from γ=0 to γ=20, a small
+markout improvement, and a clear reduction in peak inventory (0.008 → 0.004),
+which is what the skew is actually for. It does not come close to overcoming the
+fee.
+
+Note that fills go *up* slightly with skew (1251 → ~1300). Gentle skewing keeps
+both sides quoted instead of running into the hard position limit and going
+one-sided.
 
 ### Half-spread — the parameter that does not (fee = 0)
 
@@ -174,15 +180,15 @@ maker fee is near zero or negative. Without that, no amount of cleverness fixes
 the arithmetic. Any conversation about this strategy that does not start with
 the fee schedule is not a serious conversation.
 
-**2. Inventory skew works, measurably.** Going from γ=0 to γ=20 improves net P&L
-from −1.07 bp to −0.71 bp and markout from −0.885 bp to −0.675 bp, monotonically.
-This is the theory paying off: skewing quotes away from inventory both limits
-what you accumulate and reduces how badly you get selected against. It is not
-enough to overcome the fee, but it is a real effect, in the predicted direction,
-with the predicted mechanism.
+**2. Inventory skew helps, modestly.** γ=0 → γ=20 improves net P&L by about 9%
+(−1.069 → −0.968 bp), improves markout slightly, and halves peak inventory. The
+direction matches the theory; the magnitude is small on a one-tick book, for the
+same reason as finding 4 — there is very little room to express a preference in
+a price. **See §7 for why an earlier version of this document claimed a much
+larger effect.**
 
-**3. Gross P&L is negative before fees at all.** Even at zero fee we lose 0.82 bp,
-and markout says why: −0.79 bp of adverse selection. Nearly the entire gross loss
+**3. Gross P&L is negative before fees at all.** Even at zero fee we lose 1.03 bp,
+and markout says why: −0.89 bp of adverse selection. Nearly the entire gross loss
 *is* adverse selection. The fills we get are systematically the ones we don't
 want, exactly as Lesson 0 predicted.
 
@@ -223,6 +229,58 @@ backtest:
   anything stronger needs hours of data across rising, falling and flat markets.
   That costs nothing but wall-clock time, and it is the first thing I would do
   with another day.
+
+## 7. The units bug that faked a result
+
+Worth recording in full, because the failure mode is more instructive than the
+fix.
+
+The skew was originally written straight from the paper:
+
+```cpp
+reservation = fair - q_norm * gamma * sigma * sigma;   // WRONG
+```
+
+In Avellaneda–Stoikov the units of `q·γ·σ²` cancel against γ's own units. Making
+γ dimensionless and normalising `q` — which we did so the parameter would be
+tunable — breaks that cancellation. `sigma` is in absolute price units, so on a
+65,000-priced asset `sigma²` is around **133**. The skew was shoving quotes
+*hundreds of dollars* through the opposite touch.
+
+**The backtest never noticed.** It happily quoted 133 dollars away, filled less
+on one side, and reported *better* numbers — so γ looked like a monotonic
+improvement all the way to γ=20. It was not measuring inventory skew at all; it
+was measuring "stop quoting the side that increases inventory", implemented by
+accident.
+
+What caught it was the **exchange**, on the very first live run:
+
+```
+mid 65184.50  →  BID 65317.90
+{"code":-5022,"msg":"Due to the order could not be executed as maker,
+                     the Post Only order will be rejected."}
+```
+
+Three lessons:
+
+1. **The unit test that "covered" this passed `sigma = 0.5`.** At that scale
+   `sigma²` is 0.25 and the bug is invisible. A test with unrealistic inputs
+   certifies nothing. `test_skew_is_scale_free` now runs at real BTCUSDT prices
+   with a measured `sigma = 11.5` and asserts quotes stay within a bounded number
+   of ticks of fair value.
+2. **A backtest cannot reject a quote.** The simulator has no opinion about
+   whether a price is sane — it just models what happens if you quote there.
+   Post-only rejection is a constraint that only exists at the venue, which is
+   an argument for reaching the venue early even when the strategy is not ready.
+3. **Dimensionless parameters need a stated unit.** γ is now defined as *"how
+   many ticks to shift the quotes at full inventory"*: scale-free, bounded, and
+   obviously wrong if it ever produces a 133-dollar shift.
+
+The corrected form:
+
+```cpp
+const double reservation = fair - q_norm * p_.gamma * tick_px;
+```
 
 ---
 

@@ -442,6 +442,51 @@ static void test_inventory_skew() {
     CHECK(maxed.ask);
 }
 
+static void test_skew_is_scale_free() {
+    std::printf("test_skew_is_scale_free\n");
+
+    // REGRESSION TEST for a units bug that only appeared at real market scale.
+    //
+    // The skew was originally q*gamma*sigma^2 with sigma in absolute price
+    // units. On BTCUSDT, sigma is around 11, so sigma^2 is ~133 -- the skew
+    // pushed quotes 133 DOLLARS through the opposite touch and every order came
+    // back rejected as a would-be taker.
+    //
+    // The unit test that "covered" this passed a toy sigma of 0.5, where
+    // sigma^2 is 0.25 and the bug is invisible. A test with unrealistic inputs
+    // is a test that certifies nothing.
+    MMParams p;
+    p.tick            = *parse_fixed("0.10");
+    p.size            = *parse_fixed("0.002");
+    p.max_position    = *parse_fixed("0.010");
+    p.base_half_ticks = 1.0;
+    p.gamma           = 5.0;
+    p.use_microprice  = false;
+
+    OrderBook book;  // realistic BTCUSDT prices, not 100.00
+    book.apply_bid(*parse_fixed("65184.40"), *parse_fixed("10"));
+    book.apply_ask(*parse_fixed("65184.50"), *parse_fixed("10"));
+
+    const double kRealSigma = 11.5;  // measured on live BTCUSDT
+    const double mid        = *book.mid();
+
+    for (const Qty pos : {*parse_fixed("-0.010"), *parse_fixed("-0.002"), Qty{0},
+                          *parse_fixed("0.002"), *parse_fixed("0.008")}) {
+        const Quote q = MarketMaker(p).quote(book, pos, kRealSigma);
+
+        // Whatever the inventory, quotes must stay within a few ticks of fair
+        // value. gamma is a number of TICKS, so the bound is knowable.
+        const double max_shift = (p.gamma + p.base_half_ticks + 1.0) * to_double(p.tick);
+        if (q.bid) CHECK(std::fabs(to_double(q.bid_px) - mid) <= max_shift);
+        if (q.ask) CHECK(std::fabs(to_double(q.ask_px) - mid) <= max_shift);
+
+        // And they must never cross -- the condition the exchange rejects with
+        // -5022 "could not be executed as maker".
+        if (q.bid) CHECK(q.bid_px < book.best_ask()->px);
+        if (q.ask) CHECK(q.ask_px > book.best_bid()->px);
+    }
+}
+
 static void test_quotes_never_cross() {
     std::printf("test_quotes_never_cross\n");
 
@@ -479,6 +524,7 @@ int main() {
     test_portfolio_accounting();
     test_markout_detects_adverse_selection();
     test_inventory_skew();
+    test_skew_is_scale_free();
     test_quotes_never_cross();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);

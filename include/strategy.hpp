@@ -98,12 +98,24 @@ public:
         if (!fair_opt) return q;
         const double fair = *fair_opt;
 
+        const double tick_px = to_double(p_.tick);
         const double q_norm =
             static_cast<double>(position) / static_cast<double>(p_.max_position);
-        const double reservation = fair - q_norm * p_.gamma * sigma * sigma;
 
-        const double tick_px = to_double(p_.tick);
-        const double half    = (p_.base_half_ticks * tick_px) + (p_.vol_coeff * sigma);
+        // Inventory skew, expressed in TICKS.
+        //
+        // A-S writes this as q*gamma*sigma^2, where the units cancel against
+        // gamma's own units. Making gamma dimensionless and normalising q (as
+        // we do, so the parameter is tunable) breaks that cancellation: sigma is
+        // in price units, so sigma^2 on a 65,000-priced asset is ~133 -- and the
+        // skew shoves quotes hundreds of dollars through the opposite touch.
+        //
+        // Scaling by the TICK instead keeps gamma meaningful and independent of
+        // the instrument's price scale: gamma is "how many ticks to shift the
+        // quotes when inventory is at its limit".
+        const double reservation = fair - q_norm * p_.gamma * tick_px;
+
+        const double half = (p_.base_half_ticks * tick_px) + (p_.vol_coeff * sigma);
 
         Price bid_px = floor_to_tick(reservation - half, p_.tick);
         Price ask_px = ceil_to_tick(reservation + half, p_.tick);
