@@ -49,6 +49,40 @@ std::string env_or_empty(const char* k) {
     return v ? v : "";
 }
 
+// Loads KEY=VALUE lines from a .env file into the process environment, without
+// overwriting anything already set.
+//
+// Credentials live in a gitignored file rather than in shell history or a
+// command line. `ps` shows every running process's argv to every user on the
+// machine, and shell history files are backed up, synced and pasted into bug
+// reports. A secret that was ever an argument is a leaked secret.
+void load_env_file(const std::string& path) {
+    std::FILE* f = std::fopen(path.c_str(), "r");
+    if (!f) return;
+
+    char line[1024];
+    while (std::fgets(line, sizeof line, f)) {
+        std::string s(line);
+        while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ')) s.pop_back();
+
+        const auto hash = s.find_first_not_of(" \t");
+        if (hash == std::string::npos || s[hash] == '#') continue;
+
+        const auto eq = s.find('=');
+        if (eq == std::string::npos) continue;
+
+        std::string key = s.substr(hash, eq - hash);
+        std::string val = s.substr(eq + 1);
+        while (!key.empty() && key.back() == ' ') key.pop_back();
+        if (val.size() >= 2 && (val.front() == '"' || val.front() == '\'') &&
+            val.back() == val.front()) {
+            val = val.substr(1, val.size() - 2);
+        }
+        if (!key.empty()) ::setenv(key.c_str(), val.c_str(), 0 /* don't overwrite */);
+    }
+    std::fclose(f);
+}
+
 std::int64_t now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::system_clock::now().time_since_epoch())
@@ -241,11 +275,15 @@ int main(int argc, char** argv) {
         }
     }
 
+    load_env_file(".env");
     Credentials creds{env_or_empty("BINANCE_API_KEY"), env_or_empty("BINANCE_API_SECRET")};
     if (live && (creds.api_key.empty() || creds.secret.empty())) {
         std::fprintf(stderr,
-                     "--live requires BINANCE_API_KEY and BINANCE_API_SECRET in the\n"
-                     "environment. Get testnet keys at https://testnet.binancefuture.com\n");
+                     "--live needs BINANCE_API_KEY and BINANCE_API_SECRET.\n"
+                     "Put them in a .env file in the project root (it is gitignored):\n"
+                     "  BINANCE_API_KEY=...\n"
+                     "  BINANCE_API_SECRET=...\n"
+                     "Testnet keys: https://testnet.binancefuture.com\n");
         return 2;
     }
 
