@@ -279,11 +279,18 @@ int main(int argc, char** argv) {
     MMParams    mm;
     RiskConfig  rk;
 
+    // Defaults chosen by backtest sweep, not by taste (docs/04 section 4):
+    // tight inventory limit plus strong skew was both the best-performing and
+    // the least risky configuration -- inventory never accumulated at all.
+    //
+    // max_position is deliberately only 2x the quote size. Inventory you never
+    // accumulate costs nothing to unwind, and unwinding is expensive: closing
+    // 0.160 BTC cost 10.6 USDT in taker fees and slippage (docs/05 section 9).
     mm.tick            = *parse_fixed("0.10");
     mm.size            = *parse_fixed("0.002");
-    mm.max_position    = *parse_fixed("0.010");
+    mm.max_position    = *parse_fixed("0.004");
     mm.base_half_ticks = 0.5;
-    mm.gamma           = 5.0;
+    mm.gamma           = 50.0;
     mm.use_microprice  = true;
 
     rk.max_position   = mm.max_position;
