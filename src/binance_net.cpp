@@ -9,6 +9,7 @@
 #include <boost/beast/websocket.hpp>
 #include <boost/beast/websocket/ssl.hpp>
 
+#include <optional>
 #include <stdexcept>
 
 namespace hft {
@@ -135,6 +136,92 @@ std::string https_request(const std::string& method, const std::string& host,
                                  method + " " + host + target + ": " + res.body());
     }
     return res.body();
+}
+
+// --------------------------------------------------------------- HttpsSession
+
+struct HttpsSession::Impl {
+    std::string                             host;
+    net::io_context                         ioc;
+    ssl::context                            ctx = make_ssl_context();
+    std::optional<ssl::stream<tcp::socket>> stream;
+    std::uint64_t                           reconnects = 0;
+
+    void connect() {
+        stream.emplace(ioc, ctx);
+        tcp::resolver resolver{ioc};
+        net::connect(stream->next_layer(), resolver.resolve(host, "443"));
+        set_sni(stream->native_handle(), host);
+        stream->handshake(ssl::stream_base::client);
+    }
+
+    void drop() noexcept {
+        try {
+            if (stream) {
+                beast::error_code ec;
+                stream->shutdown(ec);
+            }
+        } catch (...) {
+        }
+        stream.reset();
+    }
+};
+
+HttpsSession::HttpsSession(std::string host) : impl_(std::make_unique<Impl>()) {
+    impl_->host = std::move(host);
+}
+
+HttpsSession::~HttpsSession() { impl_->drop(); }
+
+std::uint64_t HttpsSession::reconnects() const { return impl_->reconnects; }
+
+std::string HttpsSession::request(const std::string& method, const std::string& target,
+                                  const std::string& api_key) {
+    auto& d = *impl_;
+
+    // One retry, because a keep-alive connection the server closed while idle
+    // fails on the NEXT write, not at close time. That is expected, not an
+    // error, and must not surface as a failed order.
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        try {
+            if (!d.stream) {
+                d.connect();
+                if (attempt > 0) ++d.reconnects;
+            }
+
+            http::verb verb = http::verb::get;
+            if (method == "POST") verb = http::verb::post;
+            else if (method == "DELETE") verb = http::verb::delete_;
+            else if (method == "PUT") verb = http::verb::put;
+
+            http::request<http::string_body> req{verb, target, 11};
+            req.set(http::field::host, d.host);
+            req.set(http::field::user_agent, "hftbot/0.1");
+            req.keep_alive(true);
+            if (!api_key.empty()) req.set("X-MBX-APIKEY", api_key);
+            req.prepare_payload();
+            http::write(*d.stream, req);
+
+            beast::flat_buffer                buffer;
+            http::response<http::string_body> res;
+            http::read(*d.stream, buffer, res);
+
+            if (!res.keep_alive()) d.drop();  // server asked us to close
+
+            if (res.result() != http::status::ok) {
+                throw std::runtime_error("HTTP " + std::to_string(res.result_int()) + " from " +
+                                         method + " " + d.host + target + ": " + res.body());
+            }
+            return res.body();
+        } catch (const boost::system::system_error&) {
+            // Transport-level failure: the connection is unusable. Drop it and
+            // retry once on a fresh one. HTTP errors above are NOT caught here --
+            // a -5022 rejection is an answer, not a broken pipe.
+            d.drop();
+            if (attempt == 1) throw;
+        }
+    }
+    throw std::runtime_error("unreachable");
 }
 
 }  // namespace hft

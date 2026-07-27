@@ -32,7 +32,7 @@ struct SymbolSpec {
 class ExecClient {
 public:
     ExecClient(std::string host, Credentials creds, SymbolSpec spec)
-        : host_(std::move(host)), creds_(std::move(creds)), spec_(std::move(spec)) {}
+        : session_(host), creds_(std::move(creds)), spec_(std::move(spec)) {}
 
     // POST-ONLY limit order.
     //
@@ -80,12 +80,12 @@ private:
     std::string send(const char* method, const char* path, const std::string& query,
                      std::int64_t now_ms) {
         const std::string signed_q = sign_query(query, creds_.secret, now_ms);
-        return https_request(method, host_, std::string(path) + "?" + signed_q, creds_.api_key);
+        return session_.request(method, std::string(path) + "?" + signed_q, creds_.api_key);
     }
 
-    std::string host_;
-    Credentials creds_;
-    SymbolSpec  spec_;
+    HttpsSession session_;
+    Credentials  creds_;
+    SymbolSpec   spec_;
 };
 
 }  // namespace hft

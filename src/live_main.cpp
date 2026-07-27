@@ -111,8 +111,8 @@ struct LiveOrder {
 
 class LiveTrader {
 public:
-    LiveTrader(ExecClient exec, MMParams mm, RiskConfig risk, bool dry)
-        : exec_(std::move(exec)), mm_(mm), risk_(risk), dry_(dry) {}
+    LiveTrader(ExecClient& exec, MMParams mm, RiskConfig risk, bool dry)
+        : exec_(exec), mm_(mm), risk_(risk), dry_(dry) {}
 
     void set_position(Qty p) { position_ = p; }
     Qty  position() const { return position_; }
@@ -216,7 +216,7 @@ private:
         return id;
     }
 
-    ExecClient    exec_;
+    ExecClient&   exec_;
     MarketMaker   mm_;
     RiskGate      risk_;
     bool          dry_;

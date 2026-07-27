@@ -140,7 +140,54 @@ and on any exception we do not understand. The pattern throughout: **when
 something is wrong, the default is to have no orders in the market**, not to
 hope.
 
-## 8. A debugging note worth keeping
+## 8. Latency, measured against a real exchange
+
+The first live run rejected almost every bid with `-5022`. Two separate causes,
+and separating them took measurement rather than guessing.
+
+**Cause 1: a units bug in the strategy**, which put the bid 133 dollars through
+the ask. Covered in [Lesson 4 §7](04-fills-and-strategy.md) — the backtest could
+never have caught it, because a simulator has no opinion about whether a quote
+is sane. Only the venue does.
+
+**Cause 2: order round-trip latency.** The original client opened a fresh TCP +
+TLS connection per order:
+
+```
+new connection per request:  0.39 s
+reused connection:           0.28 s
+```
+
+390 ms is long enough for BTCUSDT to move a tick, so a price computed as passive
+arrives crossing, and post-only correctly rejects it. `HttpsSession` now holds
+one connection open and reconnects transparently — servers close idle
+keep-alives, and that failure surfaces on the *next* write, so the retry is part
+of the design rather than error handling bolted on.
+
+Measured over 75-second live runs:
+
+| configuration | orders accepted | rejected | reject rate |
+|---|---|---|---|
+| new connection each time, 0.5 tick | 27 | 26 | 49% |
+| **keep-alive**, 0.5 tick | 48 | 85 | 64% |
+| **keep-alive**, 3 ticks from fair | 63 | 46 | **42%** |
+
+Two things worth reading carefully:
+
+1. Connection reuse **2.5×'d the throughput** (53 → 133 attempts in the same
+   window) but *raised* the reject rate. Faster requoting means chasing the book
+   more often, and every attempt carries the same in-flight risk. Throughput and
+   hit rate are different problems.
+2. Quoting further from the touch is what actually fixes rejections — 64% → 42%
+   — because a wider margin absorbs a tick of movement during flight. It costs
+   queue position, which is the trade-off the backtester models.
+
+The honest conclusion: **at ~280 ms round trip over REST, you cannot reliably
+join the touch on BTCUSDT.** Binance offers a WebSocket order-entry API that
+would cut this substantially, and that is the correct next step — not more
+strategy tuning.
+
+## 9. A debugging note worth keeping
 
 The long recording initially failed the determinism check. It was not a bug in
 the replay engine — the recorder was **still writing the file**. Two passes read
@@ -150,7 +197,7 @@ Worth internalising because it generalises: when a deterministic system suddenly
 is not, question the *inputs* before the logic. The file was growing 25 KB every
 three seconds and `ls` showed it in two commands.
 
-## 9. Getting testnet keys
+## 10. Getting testnet keys
 
 ```bash
 # 1. Register at https://testnet.binancefuture.com (separate from the real account)

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -33,6 +34,33 @@ public:
     std::string_view read();
 
     void close() noexcept;
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+// A persistent HTTPS connection.
+//
+// Opening a fresh TCP + TLS connection per order costs ~390ms round trip to
+// Binance; reusing one costs ~280ms. On a book that moves a tick in that window,
+// the difference decides whether a post-only order is still passive when it
+// arrives -- measured, not guessed (docs/05).
+//
+// Reconnects transparently when the peer closes the connection, which servers
+// do routinely on idle keep-alives.
+class HttpsSession {
+public:
+    explicit HttpsSession(std::string host);
+    ~HttpsSession();
+    HttpsSession(const HttpsSession&)            = delete;
+    HttpsSession& operator=(const HttpsSession&) = delete;
+
+    // Throws std::runtime_error on any non-200, with the exchange's error body.
+    std::string request(const std::string& method, const std::string& target,
+                        const std::string& api_key = "");
+
+    std::uint64_t reconnects() const;
 
 private:
     struct Impl;
