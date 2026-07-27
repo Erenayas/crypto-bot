@@ -44,6 +44,9 @@ target_link_libraries(hftbot PRIVATE hft_core hft_net hft_io simdjson::simdjson)
 add_executable(hftreplay src/replay_main.cpp)
 target_link_libraries(hftreplay PRIVATE hft_core hft_io simdjson::simdjson)
 
+add_executable(hftbacktest src/backtest_main.cpp)
+target_link_libraries(hftbacktest PRIVATE hft_core hft_io simdjson::simdjson)
+
 enable_testing()
 
 add_executable(test_core tests/test_core.cpp)

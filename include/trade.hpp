@@ -6,8 +6,6 @@
 
 namespace hft {
 
-enum class Side { Buy, Sell };
-
 // One trade off the wire.
 //
 // Binance publishes two trade streams and we accept either:

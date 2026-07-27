@@ -11,6 +11,10 @@ namespace hft {
 using Price = std::int64_t;
 using Qty   = std::int64_t;
 
+enum class Side { Buy, Sell };
+
+inline constexpr Side opposite(Side s) { return s == Side::Buy ? Side::Sell : Side::Buy; }
+
 inline constexpr std::int64_t kScale       = 100'000'000;  // 1e8
 inline constexpr int          kScaleDigits = 8;
 

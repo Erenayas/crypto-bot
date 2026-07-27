@@ -13,9 +13,9 @@ with the reasoning behind it, not just the implementation.
 |---|---|---|
 | 0 | Market microstructure fundamentals | ✅ [notes](docs/00-market-microstructure.md) |
 | 1 | Market data ingestion & order book reconstruction | ✅ [book](docs/01-order-book.md) · [transport](docs/02-transport.md) |
-| 2 | Recorder + deterministic replay harness | 🔄 [record/replay](docs/03-record-replay.md) done — fill sim next |
-| 3 | Strategy: naive quoting → Avellaneda–Stoikov | ⬜ |
-| 4 | Execution engine, risk limits, latency measurement | ⬜ |
+| 2 | Recorder + deterministic replay harness | ✅ [notes](docs/03-record-replay.md) |
+| 3 | Fill simulation, strategy, backtest | ✅ [notes](docs/04-fills-and-strategy.md) |
+| 4 | Live execution on testnet | ⬜ |
 
 ---
 
@@ -107,6 +107,21 @@ zcat < data/btcusdt.jsonl.gz | head -3            # recordings are inspectable
 Recordings are gzipped JSONL holding the exchange's bytes verbatim, covering
 both the depth stream and the trade stream over one combined connection — see
 [Lesson 3](docs/03-record-replay.md).
+
+## Backtest
+
+```bash
+./build/hftbacktest data/btcusdt.jsonl.gz --gamma 5 --half 0.5
+./build/hftbacktest data/btcusdt.jsonl.gz --gamma 0 --microprice 0   # naive baseline
+./build/hftbacktest data/btcusdt.jsonl.gz --fee 0 --csv pnl.csv      # zero-fee scenario
+```
+
+Queue-position fill model, inventory-skewed quoting, and markout-based adverse
+selection measurement — see [Lesson 4](docs/04-fills-and-strategy.md).
+
+**Headline result:** at Binance's 2 bp base maker fee the strategy loses 2.4 bp
+of traded volume; at a 0.5 bp rebate it makes 0.1 bp. On a one-tick-spread
+instrument this is a fee-tier problem before it is a strategy problem.
 
 ## Debugging
 

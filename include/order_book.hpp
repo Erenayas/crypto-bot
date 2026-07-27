@@ -90,13 +90,27 @@ public:
     std::size_t bid_levels() const { return bids_.size(); }
     std::size_t ask_levels() const { return asks_.size(); }
 
+    // Resting size at an exact price, 0 if the level is absent. The fill
+    // simulator needs this to know how much volume sits ahead of our order.
+    Qty bid_size_at(Price px) const { return size_at(bids_, px); }
+    Qty ask_size_at(Price px) const { return size_at(asks_, px); }
+    Qty size_at(Side side, Price px) const {
+        return side == Side::Buy ? bid_size_at(px) : ask_size_at(px);
+    }
+
     // Ordered best-first iteration, for printing and for depth-based signals.
     const std::map<Price, Qty, std::greater<Price>>& bids() const { return bids_; }
     const std::map<Price, Qty, std::less<Price>>&    asks() const { return asks_; }
 
 private:
-    template <class Side>
-    static void apply(Side& side, Price px, Qty qty) {
+    template <class M>
+    static Qty size_at(const M& side, Price px) {
+        const auto it = side.find(px);
+        return it == side.end() ? 0 : it->second;
+    }
+
+    template <class M>
+    static void apply(M& side, Price px, Qty qty) {
         if (qty == 0) {
             side.erase(px);  // erasing an absent key is a no-op, which is correct:
                              // the exchange may delete a level we never had.
