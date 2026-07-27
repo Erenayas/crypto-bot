@@ -39,7 +39,17 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-// One-shot blocking HTTPS GET. Throws std::runtime_error on any non-200.
-std::string https_get(const std::string& host, const std::string& target);
+// One-shot blocking HTTPS request. Throws std::runtime_error on any non-200,
+// with the exchange's error body in the message -- Binance explains rejections
+// there and swallowing it turns a five-second fix into an afternoon.
+//
+// `api_key`, when non-empty, is sent as X-MBX-APIKEY. Authenticated endpoints
+// need it in addition to the signature on the query string.
+std::string https_request(const std::string& method, const std::string& host,
+                          const std::string& target, const std::string& api_key = "");
+
+inline std::string https_get(const std::string& host, const std::string& target) {
+    return https_request("GET", host, target);
+}
 
 }  // namespace hft

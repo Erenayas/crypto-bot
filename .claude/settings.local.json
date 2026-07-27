@@ -3,7 +3,11 @@
     "allow": [
       "Bash(git add *)",
       "Bash(git commit *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(cmake -S . -B build)",
+      "Bash(cmake --build build -j)",
+      "Bash(./build/test_exec)",
+      "Bash(./build/hftreplay data/btcusdt-long.jsonl.gz --twice)"
     ]
   }
 }

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <string_view>
 
 namespace hft {
@@ -67,6 +68,34 @@ constexpr std::optional<std::int64_t> parse_fixed(std::string_view s) noexcept {
 // Never round-trip an exact value through double.
 inline constexpr double to_double(std::int64_t fixed) noexcept {
     return static_cast<double>(fixed) / static_cast<double>(kScale);
+}
+
+// Fixed point back to a decimal string, with exactly `decimals` places.
+//
+// Used for the price and quantity we send to the exchange, which is why it goes
+// through integer arithmetic rather than snprintf("%.2f", to_double(v)): a
+// value that survived the whole pipeline exactly should not acquire a rounding
+// error in the last step before the wire. Binance rejects orders whose
+// precision does not match the symbol's tickSize/stepSize.
+inline std::string format_fixed(std::int64_t v, int decimals) {
+    const bool          neg = v < 0;
+    const std::uint64_t a   = neg ? static_cast<std::uint64_t>(-v) : static_cast<std::uint64_t>(v);
+
+    std::string s;
+    if (neg) s += '-';
+    s += std::to_string(a / static_cast<std::uint64_t>(kScale));
+
+    if (decimals > 0) {
+        char          buf[kScaleDigits];
+        std::uint64_t frac = a % static_cast<std::uint64_t>(kScale);
+        for (int i = kScaleDigits - 1; i >= 0; --i) {
+            buf[i] = static_cast<char>('0' + frac % 10);
+            frac /= 10;
+        }
+        s += '.';
+        s.append(buf, static_cast<std::size_t>(decimals < kScaleDigits ? decimals : kScaleDigits));
+    }
+    return s;
 }
 
 }  // namespace hft

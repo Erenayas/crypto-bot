@@ -31,8 +31,9 @@ target_include_directories(hft_core INTERFACE include)
 target_compile_options(hft_core INTERFACE -Wall -Wextra -Wpedantic)
 
 # Transport. Boost lives behind this target and never leaks into hft_core.
-add_library(hft_net src/binance_net.cpp)
-target_link_libraries(hft_net PUBLIC hft_core PRIVATE Boost::headers OpenSSL::SSL OpenSSL::Crypto)
+add_library(hft_net src/binance_net.cpp src/signer.cpp)
+target_link_libraries(hft_net PUBLIC hft_core PRIVATE Boost::headers)
+target_link_libraries(hft_net PUBLIC OpenSSL::SSL OpenSSL::Crypto)
 
 # Recording I/O. zlib lives behind this target.
 add_library(hft_io src/gzfile.cpp)
@@ -55,8 +56,15 @@ add_test(NAME core COMMAND test_core)
 
 add_executable(test_recording tests/test_recording.cpp)
 target_link_libraries(test_recording PRIVATE hft_core hft_io simdjson::simdjson)
+
+add_executable(test_exec tests/test_exec.cpp)
+target_link_libraries(test_exec PRIVATE hft_core hft_net)
+add_test(NAME exec COMMAND test_exec)
 add_test(NAME recording COMMAND test_recording)
 
 # Debugging tool: dump raw WebSocket messages from any stream path.
+add_executable(hftlive src/live_main.cpp)
+target_link_libraries(hftlive PRIVATE hft_core hft_net simdjson::simdjson)
+
 add_executable(wsdump tools/wsdump.cpp)
 target_link_libraries(wsdump PRIVATE hft_core hft_net)

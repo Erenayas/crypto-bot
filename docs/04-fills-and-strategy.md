@@ -115,26 +115,48 @@ maker, deliberately, so the two can be compared on identical bytes.
 
 ## 4. Results
 
-60 seconds of live BTCUSDT, 574 depth events, 1646 trades. Quote size 0.002 BTC,
-max position 0.010 BTC.
+**15 minutes of live BTCUSDT**: 133,865 records, 8,808 depth events, 125,055
+trades, 0 resyncs, 0 undecodable. Quote size 0.002 BTC, max position 0.010 BTC.
+Around 1,000 simulated fills per configuration — enough to mean something.
 
-### Half-spread sweep, at Binance's 2 bp base maker fee
+Over this window the market drifted **down** roughly 0.6% (65,590 → 65,185),
+with trade flow imbalance at −0.28. Keep that in mind reading the numbers: a
+market maker in a falling market accumulates longs and bleeds. See §6.
 
-| half-spread | fills | gross P&L | fees | **net** | markout |
-|---|---|---|---|---|---|
-| 0.5 tick | 19 | −0.100 | 0.494 | **−0.593** | −0.83 bp |
-| 1 tick | 19 | −0.099 | 0.494 | **−0.593** | −0.83 bp |
-| 2 tick | 20 | −0.097 | 0.494 | **−0.591** | −0.82 bp |
-| 4 tick | 15 | −0.097 | 0.390 | **−0.486** | −0.74 bp |
+### Varying only the fee (γ=5, half-spread 0.5 tick)
 
-### Same strategy, varying only the fee
+| maker fee | fees paid | **net P&L** | net in bp | markout |
+|---|---|---|---|---|
+| 2.0 bp (base tier) | 25.49 | **−35.85** | −2.82 | −0.79 bp |
+| 1.0 bp | 12.75 | **−23.11** | −1.82 | −0.79 bp |
+| 0.0 bp | 0.00 | **−10.36** | −0.82 | −0.79 bp |
+| −0.5 bp (rebate) | −6.37 | **−3.99** | −0.31 | −0.79 bp |
 
-| maker fee | fees paid | **net P&L** | net in bp |
+### Inventory skew — the one parameter that clearly works (fee = 0)
+
+| γ | fills | **net (bp)** | markout |
 |---|---|---|---|
-| 2.0 bp (base tier) | 0.494 | **−0.593** | −2.40 |
-| 1.0 bp | 0.247 | **−0.346** | −1.40 |
-| 0.0 bp | 0.000 | **−0.100** | −0.40 |
-| −0.5 bp (rebate) | −0.123 | **+0.024** | **+0.10** |
+| 0 (no skew) | 1251 | **−1.069** | −0.885 bp |
+| 1 | 1239 | **−0.942** | −0.830 bp |
+| 5 | 1012 | **−0.816** | −0.790 bp |
+| 20 | 814 | **−0.713** | −0.675 bp |
+
+Monotonic, in both P&L and markout. Avellaneda–Stoikov's reservation-price skew
+does exactly what the theory says: quoting away from inventory reduces both how
+much you accumulate and how badly you get selected against. This is the clearest
+positive result in the project.
+
+### Half-spread — the parameter that does not (fee = 0)
+
+| half-spread | fills | net (bp) |
+|---|---|---|
+| 0.5 tick | 1012 | −0.816 |
+| 1 tick | 1015 | −0.817 |
+| 2 tick | 979 | −0.829 |
+| 4 tick | 976 | −0.819 |
+| 8 tick | 945 | −0.813 |
+
+Flat within noise across a 16× range. See finding 3 below.
 
 ## 5. What this actually means
 
@@ -143,25 +165,34 @@ from arithmetic alone, and it is worth more than a backtest that "worked".
 
 Three findings, in order of importance:
 
-**1. This is a fee-tier problem before it is a strategy problem.** The entire
-P&L range from −2.40 bp to +0.10 bp is driven by the fee, not by anything the
+**1. This is a fee-tier problem before it is a strategy problem.** The whole
+range from −2.82 bp to −0.31 bp is driven by the fee, not by anything the
 strategy does. BTCUSDT's book sits at a one-tick spread — about 0.15 bp round
-trip — while the base maker fee is 2 bp per side. **You cannot capture 0.15 bp
+trip — while the base maker fee is 2 bp *per side*. **You cannot capture 0.15 bp
 and pay 4 bp.** Real market makers on this venue operate at VIP tiers where the
 maker fee is near zero or negative. Without that, no amount of cleverness fixes
-the arithmetic.
+the arithmetic. Any conversation about this strategy that does not start with
+the fee schedule is not a serious conversation.
 
-**2. Gross P&L is negative before fees at all.** Even at zero fee we lose 0.40 bp,
-and markout says why: −0.83 bp of adverse selection. The fills we get are
-systematically the ones we don't want. Widening the spread reduces it (−0.83 →
-−0.74 bp at 4 ticks) but also cuts fills, so it does not rescue the total.
+**2. Inventory skew works, measurably.** Going from γ=0 to γ=20 improves net P&L
+from −1.07 bp to −0.71 bp and markout from −0.885 bp to −0.675 bp, monotonically.
+This is the theory paying off: skewing quotes away from inventory both limits
+what you accumulate and reduces how badly you get selected against. It is not
+enough to overcome the fee, but it is a real effect, in the predicted direction,
+with the predicted mechanism.
 
-**3. The microprice signal is smaller than one tick, so quoting rounds it away.**
-Naive-mid and microprice configurations produce nearly identical results. The
-microprice edge is ~0.03 on a 0.10 tick — a real signal that cannot be expressed
-in a *price* on this instrument. To use it you would have to express it in
-**size**, in **whether to quote at all**, or trade a wider-spread instrument.
-That is a genuine microstructure constraint, not a bug.
+**3. Gross P&L is negative before fees at all.** Even at zero fee we lose 0.82 bp,
+and markout says why: −0.79 bp of adverse selection. Nearly the entire gross loss
+*is* adverse selection. The fills we get are systematically the ones we don't
+want, exactly as Lesson 0 predicted.
+
+**4. Half-spread does essentially nothing, across a 16× range.** Because on a
+one-tick book, quotes get rounded and clamped into nearly the same places
+regardless. The related finding: the microprice edge is ~0.03 against a 0.10
+tick — a real signal that **cannot be expressed in a price** on this instrument.
+To use it you would have to express it in **size**, in **whether to quote at
+all**, or trade a wider-spread instrument. That is a genuine microstructure
+constraint, not a bug.
 
 ### What would come next, given more time
 
@@ -183,9 +214,15 @@ backtest:
   book, not inside it. At 0.002 BTC on BTCUSDT that is a fair approximation;
   at size it would not be.
 - **Cancel/replace is instant and free** beyond the queue-position cost.
-- **Sample is short.** 60 seconds is enough to validate the machinery, not to
-  draw a conclusion about a strategy. Longer recordings are the fix, and cost
-  nothing but wall-clock time.
+- **One 15-minute sample, in a downtrend.** The market fell 0.6% during this
+  window with trade flow imbalance at −0.28. A market maker in a falling market
+  accumulates longs and bleeds, so these numbers are pessimistic for reasons
+  that have nothing to do with the strategy's quality. **This sample cannot show
+  that the strategy is unprofitable in general** — only that it was unprofitable
+  here, and that fees dominate its P&L regardless of regime. Establishing
+  anything stronger needs hours of data across rising, falling and flat markets.
+  That costs nothing but wall-clock time, and it is the first thing I would do
+  with another day.
 
 ---
 

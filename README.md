@@ -15,7 +15,7 @@ with the reasoning behind it, not just the implementation.
 | 1 | Market data ingestion & order book reconstruction | ✅ [book](docs/01-order-book.md) · [transport](docs/02-transport.md) |
 | 2 | Recorder + deterministic replay harness | ✅ [notes](docs/03-record-replay.md) |
 | 3 | Fill simulation, strategy, backtest | ✅ [notes](docs/04-fills-and-strategy.md) |
-| 4 | Live execution on testnet | ⬜ |
+| 4 | Live execution, signing, risk limits | ✅ [notes](docs/05-execution-and-risk.md) |
 
 ---
 
@@ -119,9 +119,27 @@ both the depth stream and the trade stream over one combined connection — see
 Queue-position fill model, inventory-skewed quoting, and markout-based adverse
 selection measurement — see [Lesson 4](docs/04-fills-and-strategy.md).
 
-**Headline result:** at Binance's 2 bp base maker fee the strategy loses 2.4 bp
-of traded volume; at a 0.5 bp rebate it makes 0.1 bp. On a one-tick-spread
-instrument this is a fee-tier problem before it is a strategy problem.
+**Headline result** (15 min of live BTCUSDT, ~1000 simulated fills): the
+strategy loses 2.82 bp of traded volume at Binance's 2 bp base maker fee, and
+0.82 bp even at zero fee. Markout is −0.79 bp, so nearly the entire gross loss
+is adverse selection. Inventory skew helps monotonically (−1.07 bp at γ=0 →
+−0.71 bp at γ=20); half-spread does essentially nothing across a 16× range.
+
+On a one-tick-spread instrument this is a **fee-tier problem before it is a
+strategy problem** — you cannot capture 0.15 bp and pay 4 bp. Caveats and
+limitations are in [Lesson 4](docs/04-fills-and-strategy.md), not hidden.
+
+## Live trading (testnet)
+
+```bash
+export BINANCE_API_KEY=...  BINANCE_API_SECRET=...   # testnet.binancefuture.com
+./build/hftlive                  # dry run: quotes computed and logged, nothing sent
+./build/hftlive --live           # places post-only orders on TESTNET
+```
+
+Testnet only, dry run by default, post-only (GTX) orders, and every order gated
+by position / rate / staleness / drawdown checks — see
+[Lesson 5](docs/05-execution-and-risk.md).
 
 ## Debugging
 

@@ -94,7 +94,8 @@ void WebSocketClient::close() noexcept {
 
 // ------------------------------------------------------------------ https_get
 
-std::string https_get(const std::string& host, const std::string& target) {
+std::string https_request(const std::string& method, const std::string& host,
+                          const std::string& target, const std::string& api_key) {
     net::io_context ioc;
     ssl::context    ctx = make_ssl_context();
 
@@ -105,9 +106,19 @@ std::string https_get(const std::string& host, const std::string& target) {
     set_sni(stream.native_handle(), host);
     stream.handshake(ssl::stream_base::client);
 
-    http::request<http::string_body> req{http::verb::get, target, 11};
+    http::verb verb = http::verb::get;
+    if (method == "POST") verb = http::verb::post;
+    else if (method == "DELETE") verb = http::verb::delete_;
+    else if (method == "PUT") verb = http::verb::put;
+
+    http::request<http::string_body> req{verb, target, 11};
     req.set(http::field::host, host);
     req.set(http::field::user_agent, "hftbot/0.1");
+    if (!api_key.empty()) req.set("X-MBX-APIKEY", api_key);
+    // Binance reads signed parameters from the query string even on POST, so
+    // the body stays empty. Content-Length must still be set or some proxies
+    // hold the connection open waiting for a body that never comes.
+    req.prepare_payload();
     http::write(stream, req);
 
     beast::flat_buffer                buffer;
@@ -121,7 +132,7 @@ std::string https_get(const std::string& host, const std::string& target) {
 
     if (res.result() != http::status::ok) {
         throw std::runtime_error("HTTP " + std::to_string(res.result_int()) + " from " +
-                                 host + target + ": " + res.body());
+                                 method + " " + host + target + ": " + res.body());
     }
     return res.body();
 }
