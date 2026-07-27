@@ -159,7 +159,77 @@ forward-declares `struct gzFile_s;` rather than including `<zlib.h>`.
 `DepthSync` still knows nothing about any of it, which is why `test_core` still
 runs with no network and no files.
 
-## 8. Known limitation
+## 8. Format 2: recording trades as well
+
+A queue model needs to know *why* a price level shrank. Size can drop for two
+completely different reasons — someone **traded** against it, or someone
+**cancelled** — and the depth stream reports only the new total, so it cannot
+tell them apart. Trades are the half we can observe directly; whatever a level
+lost that trades don't account for was cancellation.
+
+So we now subscribe to depth *and* trades, over **one combined stream**:
+
+```
+/stream?streams=btcusdt@depth@100ms/btcusdt@trade
+```
+
+One connection, not two, and that is a correctness requirement rather than an
+optimisation. Two sockets would give two *independent* orderings, leaving no
+reliable way to know whether a trade happened before or after a given book
+update. "Was my level consumed by this trade, or had it already been cancelled?"
+is unanswerable if the feeds can arrive out of order relative to each other.
+
+Combined streams wrap every message: `{"stream":"...","data":{...}}`. Since the
+record kind can no longer name the content, format 2 adds kind `w` — "whatever
+the exchange sent" — and dispatch moves to the payload's own `e` field.
+
+Format 1's `e` kind is still handled. **A file format that invalidates
+yesterday's data every time you learn something is not a file format worth
+having**, and both old recordings still replay.
+
+### The bug this turned up
+
+The first version subscribed to `@aggTrade`, the stream Binance's docs
+recommend. It recorded **zero trades in 45 seconds** on BTCUSDT — which is
+impossible in a live market.
+
+Nothing errored. The subscription was accepted, depth flowed normally, and the
+trade counter simply sat at zero. That is the worst class of bug: no crash, no
+warning, just silently missing data that you would only notice much later as an
+inexplicably bad fill model.
+
+Finding it took a tool that did not exist yet — [`tools/wsdump.cpp`](../tools/wsdump.cpp),
+which connects to any stream path and prints raw messages:
+
+```bash
+./build/wsdump /ws/btcusdt@aggTrade    # connects, then nothing, ever
+./build/wsdump /ws/btcusdt@trade       # data immediately
+```
+
+`@aggTrade` connects happily and never sends. `@trade` works. We switched, and
+`@trade` is arguably the better choice anyway: one message per individual fill
+rather than per aggregated order is strictly more information for a queue model.
+
+Two lessons worth more than the fix:
+
+1. **When something produces no data, look at the wire.** From inside the bot,
+   "no trades" and "no trade messages" are indistinguishable. Ten minutes spent
+   building `wsdump` beat any amount of staring at the parser.
+2. **Test against captured messages, not invented ones.** The real `@trade`
+   payload carries `X` and `st` fields the documentation didn't lead us to
+   expect. `test_trade_decode` uses a message captured off the wire verbatim,
+   because a decoder that only parses payloads you imagined is a decoder that
+   fails on contact with the exchange.
+
+Verified on 60 seconds of live data:
+
+```
+records      2222  (snapshots 1, depth 574, trades 1646)
+trade flow   buy 34.617 / sell 28.315   imbalance +0.100
+determinism  PASS
+```
+
+## 9. Known limitation
 
 Replaying 45 seconds left the book with 1685 bid and 1566 ask levels, grown from
 a 1000-level snapshot. That is *correct* — the diff stream carries levels beyond

@@ -24,10 +24,20 @@ namespace hft {
 // Had we recorded decoded structs instead, the bug would be baked into every
 // recording we ever made, permanently.
 enum class RecordKind : char {
-    Header   = 'h',  // metadata: symbol, stream, hosts
-    Snapshot = 's',  // REST depth snapshot
-    Event    = 'e',  // WebSocket depth event
+    Header    = 'h',  // metadata: symbol, streams, hosts
+    Snapshot  = 's',  // REST depth snapshot
+    Event     = 'e',  // format 1: a depth event, and nothing else
+    WsMessage = 'w',  // format 2: any WebSocket message; dispatch on payload "e"
 };
+
+// Why format 2 exists: once we subscribe to more than one stream, the record
+// kind can no longer name the content -- the message itself does, via its "e"
+// field. So 'w' means "whatever the exchange sent us over the socket".
+//
+// 'e' is kept because recordings made with format 1 must keep replaying. A file
+// format that invalidates yesterday's data every time you learn something is
+// not a file format worth having.
+inline constexpr int kRecordingFormat = 2;
 
 // Wall-clock time, for correlating with the exchange's own E/T timestamps.
 //

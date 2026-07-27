@@ -53,3 +53,7 @@ add_test(NAME core COMMAND test_core)
 add_executable(test_recording tests/test_recording.cpp)
 target_link_libraries(test_recording PRIVATE hft_core hft_io simdjson::simdjson)
 add_test(NAME recording COMMAND test_recording)
+
+# Debugging tool: dump raw WebSocket messages from any stream path.
+add_executable(wsdump tools/wsdump.cpp)
+target_link_libraries(wsdump PRIVATE hft_core hft_net)

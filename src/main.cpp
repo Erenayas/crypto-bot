@@ -1,24 +1,26 @@
-// Phase 1 deliverable: a live, verified L2 order book.
+// Phase 1/2 deliverable: a live, verified L2 order book plus trade flow.
 //
 //   ./build/hftbot                    BTCUSDT from mainnet market data
 //   ./build/hftbot --symbol ethusdt   another symbol
+//   ./build/hftbot --record f.gz      also write a replayable recording
 //   ./build/hftbot --testnet          testnet market data (see note below)
 
 #include "binance_net.hpp"
 #include "depth_sync.hpp"
 #include "json_decode.hpp"
 #include "recording.hpp"
+#include "trade.hpp"
 
 #include <algorithm>
 #include <atomic>
-#include <csignal>
-#include <optional>
-#include <chrono>
 #include <cctype>
+#include <chrono>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
 #include <iterator>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -37,9 +39,9 @@ using namespace hft;
 // spreads, depth and fill rates there bear no resemblance to reality. Every
 // strategy number we produce from it in Week 3 would be meaningless. Testnet is
 // where the ORDERS go in Week 4; mainnet is where the DATA comes from now.
-constexpr char kWsHostLive[]  = "fstream.binance.com";
+constexpr char kWsHostLive[]   = "fstream.binance.com";
 constexpr char kRestHostLive[] = "fapi.binance.com";
-constexpr char kWsHostTest[]  = "stream.binancefuture.com";
+constexpr char kWsHostTest[]   = "stream.binancefuture.com";
 constexpr char kRestHostTest[] = "testnet.binancefuture.com";
 
 // Clean shutdown. A recorder that is SIGKILLed loses whatever sits in zlib's
@@ -56,18 +58,28 @@ std::string to_upper(std::string s) {
     return s;
 }
 
+struct FeedStats {
+    std::uint64_t        events    = 0;
+    std::uint64_t        trades    = 0;
+    std::uint64_t        undecoded = 0;
+    Qty                  buy_vol   = 0;  // aggressive buying: lifted asks
+    Qty                  sell_vol  = 0;  // aggressive selling: hit bids
+    std::optional<Trade> last;
+};
+
 // Display only. BTCUSDT quotes to 2 decimals and sizes to 3; Week 4 will read
 // the real tickSize/stepSize per symbol from /fapi/v1/exchangeInfo.
 void print_book(const DepthSync& sync, const std::string& symbol, int levels,
-                std::uint64_t events, std::uint64_t undecoded) {
+                const FeedStats& st) {
     const auto& book = sync.book();
 
     std::printf("\033[2J\033[H");  // clear screen, home cursor
-    std::printf("%s   %s   events %llu   resyncs %llu   undecoded %llu\n\n",
+    std::printf("%s   %s   events %llu   trades %llu   resyncs %llu   undecoded %llu\n\n",
                 symbol.c_str(), sync.synced() ? "SYNCED" : "SYNCING",
-                static_cast<unsigned long long>(events),
+                static_cast<unsigned long long>(st.events),
+                static_cast<unsigned long long>(st.trades),
                 static_cast<unsigned long long>(sync.resync_count()),
-                static_cast<unsigned long long>(undecoded));
+                static_cast<unsigned long long>(st.undecoded));
 
     // Asks are printed worst-to-best so the book reads top-down like an
     // exchange UI, with the spread in the middle.
@@ -92,6 +104,20 @@ void print_book(const DepthSync& sync, const std::string& symbol, int levels,
         std::printf("        BID  %12.2f   x %10.3f\n", to_double(it->first), to_double(it->second));
     }
 
+    // Trade flow imbalance: of the size that CROSSED the spread, how much was
+    // buying? This is a second, independent alpha signal -- the book tells you
+    // what people are willing to do, trades tell you what they actually did.
+    const double total = static_cast<double>(st.buy_vol + st.sell_vol);
+    if (total > 0) {
+        const double ofi = static_cast<double>(st.buy_vol - st.sell_vol) / total;
+        std::printf("\n  flow  buy %.3f / sell %.3f   imbalance %+.3f\n",
+                    to_double(st.buy_vol), to_double(st.sell_vol), ofi);
+    }
+    if (st.last) {
+        std::printf("  last  %.2f x %.3f   aggressor %s\n", to_double(st.last->px),
+                    to_double(st.last->qty), st.last->hit_bid() ? "SELL" : "BUY");
+    }
+
     if (book.crossed()) {
         std::printf("\n  *** BOOK IS CROSSED -- reconstruction is wrong ***\n");
     }
@@ -101,10 +127,10 @@ void print_book(const DepthSync& sync, const std::string& symbol, int levels,
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string symbol      = "btcusdt";
+    std::string symbol = "btcusdt";
     std::string record_path;
-    bool        testnet     = false;
-    int         levels      = 5;
+    bool        testnet = false;
+    int         levels  = 5;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -122,18 +148,28 @@ int main(int argc, char** argv) {
 
     const std::string ws_host   = testnet ? kWsHostTest : kWsHostLive;
     const std::string rest_host = testnet ? kRestHostTest : kRestHostLive;
-    const std::string stream    = "/ws/" + symbol + "@depth@100ms";
+
+    // ONE combined stream, not two connections.
+    //
+    // Two sockets would give two INDEPENDENT orderings, and we would have no
+    // reliable way to know whether a trade happened before or after a given book
+    // update. The fill model depends entirely on that ordering: "was my level
+    // consumed by this trade, or had it already been cancelled?" is unanswerable
+    // if the two feeds can arrive out of order relative to each other.
+    const std::string stream =
+        "/stream?streams=" + symbol + "@depth@100ms/" + symbol + "@trade";
     const std::string snap_path = "/fapi/v1/depth?symbol=" + to_upper(symbol) + "&limit=1000";
 
-    DepthSync    sync;
-    DepthDecoder decoder;
-    std::uint64_t events = 0, undecoded = 0;
+    DepthSync      sync;
+    MessageDecoder decoder;
+    FeedStats      st;
 
     std::optional<Recorder> recorder;
     if (!record_path.empty()) {
-        const std::string meta = "{\"format\":1,\"symbol\":\"" + to_upper(symbol) +
-                                 "\",\"stream\":\"" + stream + "\",\"ws_host\":\"" + ws_host +
-                                 "\",\"rest_host\":\"" + rest_host + "\"}";
+        const std::string meta = "{\"format\":" + std::to_string(kRecordingFormat) +
+                                 ",\"symbol\":\"" + to_upper(symbol) + "\",\"stream\":\"" + stream +
+                                 "\",\"ws_host\":\"" + ws_host + "\",\"rest_host\":\"" + rest_host +
+                                 "\"}";
         recorder.emplace(record_path, meta);
         std::fprintf(stderr, "recording to %s\n", record_path.c_str());
     }
@@ -173,27 +209,47 @@ int main(int argc, char** argv) {
 
             while (!g_stop) {
                 const auto msg = ws.read();
-                ++events;
 
                 // Record BEFORE decoding, and record everything -- including
                 // messages we cannot decode. The recording is ground truth; a
                 // decoder bug must be fixable after the fact, not baked in.
-                if (recorder) recorder->write(RecordKind::Event, msg, now_ns());
+                if (recorder) recorder->write(RecordKind::WsMessage, msg, now_ns());
 
-                const auto ev = decoder.decode_event(msg);
-                if (!ev) {
-                    ++undecoded;  // not a depth event, or malformed. Never guess.
+                simdjson::dom::element payload;
+                if (!decoder.parse_message(msg, payload)) {
+                    ++st.undecoded;
                     continue;
                 }
 
-                if (sync.on_event(*ev) == SyncAction::RequestSnapshot) {
-                    resync();
+                std::string_view type;
+                if (payload["e"].get(type)) {
+                    ++st.undecoded;
+                    continue;
+                }
+
+                if (type == "depthUpdate") {
+                    ++st.events;
+                    const auto ev = decode_depth_event(payload);
+                    if (!ev) {
+                        ++st.undecoded;
+                        continue;
+                    }
+                    if (sync.on_event(*ev) == SyncAction::RequestSnapshot) resync();
+                } else if (type == "trade" || type == "aggTrade") {
+                    ++st.trades;
+                    const auto tr = decode_trade(payload);
+                    if (!tr) {
+                        ++st.undecoded;
+                        continue;
+                    }
+                    (tr->hit_bid() ? st.sell_vol : st.buy_vol) += tr->qty;
+                    st.last = *tr;
                 }
 
                 const auto now = std::chrono::steady_clock::now();
                 if (now - last_draw > std::chrono::milliseconds(250)) {
                     last_draw = now;
-                    print_book(sync, to_upper(symbol), levels, events, undecoded);
+                    print_book(sync, to_upper(symbol), levels, st);
                     // Bound how much of the recording a kill -9 can cost us.
                     if (recorder) recorder->flush();
                 }
@@ -209,8 +265,9 @@ int main(int argc, char** argv) {
 
     if (recorder) {
         recorder->flush();
-        std::fprintf(stderr, "\nstopped: %llu events recorded to %s\n",
-                     static_cast<unsigned long long>(events), record_path.c_str());
+        std::fprintf(stderr, "\nstopped: %llu depth events + %llu trades recorded to %s\n",
+                     static_cast<unsigned long long>(st.events),
+                     static_cast<unsigned long long>(st.trades), record_path.c_str());
     }
     return 0;  // Recorder's destructor closes the gzip stream cleanly.
 }

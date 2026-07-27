@@ -104,6 +104,17 @@ Market data requires no API key and places no orders — it is read-only.
 zcat < data/btcusdt.jsonl.gz | head -3            # recordings are inspectable
 ```
 
-Recordings are gzipped JSONL holding the exchange's bytes verbatim — see
+Recordings are gzipped JSONL holding the exchange's bytes verbatim, covering
+both the depth stream and the trade stream over one combined connection — see
 [Lesson 3](docs/03-record-replay.md).
+
+## Debugging
+
+```bash
+./build/wsdump /ws/btcusdt@trade                 # dump raw messages from a stream
+./build/wsdump "/stream?streams=a/b" 20          # combined stream, 20 messages
+```
+
+Built after `@aggTrade` silently delivered nothing for 45 seconds. When a feed
+produces no data, look at the wire.
 

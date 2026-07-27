@@ -2,6 +2,7 @@
 
 #include "depth_sync.hpp"
 #include "price.hpp"
+#include "trade.hpp"
 
 #include <simdjson.h>
 
@@ -76,6 +77,51 @@ inline std::optional<DepthSnapshot> decode_depth_snapshot(simdjson::dom::element
     return snap;
 }
 
+// @trade:    {"e":"trade","E":..,"T":..,"s":"BTCUSDT","t":7930321136,
+//             "p":"64917.70","q":"0.004","X":"MARKET","m":false}
+// @aggTrade: {"e":"aggTrade","E":..,"a":5933014,"s":"BTCUSDT","p":"65050.10",
+//             "q":"0.031","f":100,"l":105,"T":..,"m":true}
+//
+// Both are accepted. They differ only in granularity and in which field carries
+// the id, so one decoder covers both and recordings from either stream replay
+// through identical code.
+inline std::optional<Trade> decode_trade(simdjson::dom::element doc) {
+    std::string_view type;
+    if (doc["e"].get(type)) return std::nullopt;
+
+    const bool is_agg = (type == "aggTrade");
+    if (!is_agg && type != "trade") return std::nullopt;
+
+    Trade            t;
+    t.aggregated = is_agg;
+    std::string_view px_s, qty_s;
+    if (doc["p"].get(px_s)) return std::nullopt;
+    if (doc["q"].get(qty_s)) return std::nullopt;
+    if (doc[is_agg ? "a" : "t"].get(t.id)) return std::nullopt;
+    if (doc["T"].get(t.exch_ms)) return std::nullopt;
+    if (doc["m"].get(t.buyer_is_maker)) return std::nullopt;
+
+    const auto px  = parse_fixed(px_s);
+    const auto qty = parse_fixed(qty_s);
+    if (!px || !qty) return std::nullopt;
+    t.px  = *px;
+    t.qty = *qty;
+    return t;
+}
+
+// Combined streams (/stream?streams=a/b) wrap every message in an envelope:
+//   {"stream":"btcusdt@aggTrade","data":{ ... }}
+// Single streams (/ws/<name>) send the payload bare.
+//
+// Accepting both means a recording made with either endpoint replays through
+// exactly the same code -- including the recordings we already made before the
+// trade stream was added.
+inline simdjson::dom::element unwrap_stream_payload(simdjson::dom::element msg) {
+    simdjson::dom::element data;
+    if (!msg["data"].get(data)) return data;
+    return msg;
+}
+
 // ---------------------------------------------------------------------------
 // Decoding from a raw JSON string (the live path).
 //
@@ -83,11 +129,20 @@ inline std::optional<DepthSnapshot> decode_depth_snapshot(simdjson::dom::element
 // the whole document up front, which costs more, but the calling code reads like
 // the JSON it parses. On-Demand is a Week 4 optimisation -- after we measure.
 // ---------------------------------------------------------------------------
-class DepthDecoder {
+class MessageDecoder {
 public:
+    // Parses a raw WebSocket message and strips the combined-stream envelope.
+    // Callers then dispatch on the payload's "e" field.
+    bool parse_message(std::string_view json, simdjson::dom::element& payload) {
+        simdjson::dom::element msg;
+        if (!parse(json, msg)) return false;
+        payload = unwrap_stream_payload(msg);
+        return true;
+    }
+
     std::optional<DepthUpdate> decode_event(std::string_view json) {
         simdjson::dom::element doc;
-        if (!parse(json, doc)) return std::nullopt;
+        if (!parse_message(json, doc)) return std::nullopt;
         return decode_depth_event(doc);
     }
 

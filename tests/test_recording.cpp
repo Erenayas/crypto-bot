@@ -142,6 +142,83 @@ int main() {
         }
     }
 
+    // A trade tells us which side of the queue was consumed -- the half of
+    // level-size changes that is NOT cancellation.
+    std::printf("test_agg_trade_decode\n");
+    {
+        constexpr char kWrapped[] =
+            R"({"stream":"btcusdt@aggTrade","data":{"e":"aggTrade","E":1,"a":5933014,)"
+            R"("s":"BTCUSDT","p":"65050.10","q":"0.031","f":100,"l":105,"T":1700,"m":true}})";
+
+        simdjson::dom::parser  parser;
+        simdjson::dom::element doc;
+        CHECK(!parser.parse(kWrapped, sizeof(kWrapped) - 1).get(doc));
+
+        const auto payload = unwrap_stream_payload(doc);
+        const auto tr      = decode_trade(payload);
+        CHECK(tr.has_value());
+        if (tr) {
+            CHECK(tr->px == *parse_fixed("65050.10"));
+            CHECK(tr->qty == *parse_fixed("0.031"));
+            CHECK(tr->id == 5933014);
+            CHECK(tr->exch_ms == 1700);
+            CHECK(tr->buyer_is_maker);
+            CHECK(tr->hit_bid());                   // a resting BID was consumed
+            CHECK(tr->aggressor() == Side::Sell);   // ...so the aggressor sold
+        }
+
+        // Type dispatch must be strict in both directions: a trade is not a
+        // depth event, and silently treating one as the other would corrupt
+        // the book with garbage levels.
+        CHECK(!decode_depth_event(payload).has_value());
+    }
+
+    // The stream we actually subscribe to. This is a real message captured off
+    // fstream.binance.com with `wsdump`, not a hand-written approximation --
+    // note "X" and "st", fields we neither expected nor need. Testing against
+    // invented payloads is how you discover the real ones don't parse.
+    std::printf("test_trade_decode\n");
+    {
+        constexpr char kTrade[] =
+            R"({"e":"trade","E":1785158791614,"T":1785158791613,"s":"BTCUSDT",)"
+            R"("t":7930321136,"p":"64917.70","q":"0.004","X":"MARKET","m":false,"st":1})";
+
+        simdjson::dom::parser  parser;
+        simdjson::dom::element doc;
+        CHECK(!parser.parse(kTrade, sizeof(kTrade) - 1).get(doc));
+
+        const auto tr = decode_trade(unwrap_stream_payload(doc));
+        CHECK(tr.has_value());
+        if (tr) {
+            CHECK(tr->px == *parse_fixed("64917.70"));
+            CHECK(tr->qty == *parse_fixed("0.004"));
+            CHECK(tr->id == 7930321136LL);  // "t", not "a"
+            CHECK(tr->exch_ms == 1785158791613LL);
+            CHECK(!tr->aggregated);
+            CHECK(!tr->hit_bid());                 // a resting ASK was consumed
+            CHECK(tr->aggressor() == Side::Buy);   // ...so the aggressor bought
+        }
+    }
+
+    // A single-stream (/ws/...) message has no envelope, so unwrapping must be
+    // a no-op. This is what keeps format-1 recordings replayable.
+    std::printf("test_unwrap_bare_payload\n");
+    {
+        constexpr char kBare[] =
+            R"({"e":"aggTrade","a":1,"p":"1.5","q":"2.0","T":9,"m":false})";
+
+        simdjson::dom::parser  parser;
+        simdjson::dom::element doc;
+        CHECK(!parser.parse(kBare, sizeof(kBare) - 1).get(doc));
+
+        const auto tr = decode_trade(unwrap_stream_payload(doc));
+        CHECK(tr.has_value());
+        if (tr) {
+            CHECK(!tr->hit_bid());                 // a resting ASK was consumed
+            CHECK(tr->aggressor() == Side::Buy);   // ...so the aggressor bought
+        }
+    }
+
     std::filesystem::remove(path);
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
