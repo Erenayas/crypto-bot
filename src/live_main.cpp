@@ -21,6 +21,7 @@
 #include "exec_client.hpp"
 #include "json_decode.hpp"
 #include "risk.hpp"
+#include "symbol_info.hpp"
 #include "strategy.hpp"
 
 #include <atomic>
@@ -388,11 +389,22 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    SymbolSpec spec;
-    spec.symbol = symbol;
-    std::transform(spec.symbol.begin(), spec.symbol.end(), spec.symbol.begin(),
+    std::string upper = symbol;
+    std::transform(upper.begin(), upper.end(), upper.begin(),
                    [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-    spec.tick = mm.tick;
+
+    // Tick and step come from the venue, per symbol. Hardcoding BTCUSDT's
+    // values worked exactly as long as BTCUSDT was the only symbol.
+    SymbolSpec spec;
+    if (const auto fetched = fetch_symbol_spec(kRestHost, upper)) {
+        spec = *fetched;
+        mm.tick = spec.tick;
+        std::fprintf(stderr, "%s: tick=%s  pricePrec=%d  qtyPrec=%d\n", upper.c_str(),
+                     format_fixed(spec.tick, spec.price_dp).c_str(), spec.price_dp, spec.qty_dp);
+    } else {
+        std::fprintf(stderr, "could not fetch spec for %s from the exchange\n", upper.c_str());
+        return 1;
+    }
 
     ExecClient exec(kRestHost, creds, spec);
 
