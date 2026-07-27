@@ -1,0 +1,12 @@
+build/
+data/
+compile_commands.json
+.cache/
+.DS_Store
+__pycache__/
+.venv/
+
+# Never commit exchange credentials.
+.env
+*.key
+secrets.*
