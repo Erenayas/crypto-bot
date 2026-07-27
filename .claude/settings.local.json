@@ -7,7 +7,9 @@
       "Bash(cmake -S . -B build)",
       "Bash(cmake --build build -j)",
       "Bash(./build/test_exec)",
-      "Bash(./build/hftreplay data/btcusdt-long.jsonl.gz --twice)"
+      "Bash(./build/hftreplay data/btcusdt-long.jsonl.gz --twice)",
+      "Bash(python3 -)",
+      "Bash(./build/test_core)"
     ]
   }
 }

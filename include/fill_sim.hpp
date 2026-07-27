@@ -6,7 +6,6 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <optional>
 #include <vector>
 
 namespace hft {
@@ -18,7 +17,7 @@ struct Fill {
     std::int64_t ts;
 };
 
-// A queue-position fill model.
+// A queue-position fill model, for an arbitrary ladder of resting orders.
 //
 // The naive backtest says "price touched my level, therefore I filled". That is
 // the single biggest reason market-making backtests look profitable and then
@@ -52,66 +51,102 @@ public:
         Price px          = 0;
         Qty   qty         = 0;  // remaining
         Qty   queue_ahead = 0;
+    };
+
+    // Replaces the whole ladder on one side with `desired`.
+    //
+    // Orders already resting at a wanted price are KEPT, queue position and
+    // all. Everything else is cancelled, and new prices join at the back of
+    // their level. That diff is the entire reason this function exists rather
+    // than a cancel-all-then-place: re-placing an order at a price you already
+    // hold would silently throw away the queue position you spent time earning,
+    // which is the most valuable thing a market maker owns.
+    void replace(Side side, const std::vector<Level>& desired, const OrderBook& book) {
+        auto& live = side == Side::Buy ? bids_ : asks_;
+
+        std::vector<Order> next;
+        next.reserve(desired.size());
+
+        for (const auto& want : desired) {
+            const auto it = std::find_if(live.begin(), live.end(),
+                                         [&](const Order& o) { return o.px == want.px; });
+            if (it != live.end()) {
+                Order kept = *it;
+                kept.qty   = want.qty;  // resizing does not lose our place
+                next.push_back(kept);
+            } else {
+                next.push_back(Order{want.px, want.qty, book.size_at(side, want.px)});
+                ++placements_;
+            }
+        }
+        live.swap(next);
+    }
+
+    // Single-level convenience. A one-order-per-side market maker is just a
+    // ladder of length one, so these are wrappers rather than a second
+    // implementation -- there is only one set of queue rules to get right.
+    void place(Side side, Price px, Qty qty, const OrderBook& book) {
+        replace(side, std::vector<Level>{Level{px, qty}}, book);
+    }
+
+    void cancel(Side side) { cancel_side(side); }
+
+    struct OrderView {
+        Price px          = 0;
+        Qty   qty         = 0;
+        Qty   queue_ahead = 0;
         bool  active      = false;
     };
 
-    // Places (or replaces) our single resting order on `side`.
-    //
-    // Replacing at a DIFFERENT price throws away queue position: the new order
-    // goes to the back of the new level. That cost is real, it is why a market
-    // maker cannot requote on every tick, and it falls out of this model for
-    // free rather than having to be bolted on.
-    void place(Side side, Price px, Qty qty, const OrderBook& book) {
-        Order& o = order(side);
-        if (o.active && o.px == px) {
-            o.qty = qty;  // same price: keep our place in the queue
-            return;
-        }
-        o.px          = px;
-        o.qty         = qty;
-        o.queue_ahead = book.size_at(side, px);
-        o.active      = true;
-        ++placements_;
-    }
-
-    void cancel(Side side) { order(side).active = false; }
+    OrderView bid() const { return view(bids_); }
+    OrderView ask() const { return view(asks_); }
 
     void cancel_all() {
-        bid_.active = false;
-        ask_.active = false;
+        bids_.clear();
+        asks_.clear();
     }
 
-    const Order& bid() const { return bid_; }
-    const Order& ask() const { return ask_; }
+    void cancel_side(Side side) { (side == Side::Buy ? bids_ : asks_).clear(); }
+
+    const std::vector<Order>& orders(Side side) const { return side == Side::Buy ? bids_ : asks_; }
+    std::size_t   resting(Side side) const { return orders(side).size(); }
     std::uint64_t placements() const { return placements_; }
 
     // Cancellations only ever clamp our queue position; they never improve it.
     void on_book(const OrderBook& book) {
-        clamp(bid_, Side::Buy, book);
-        clamp(ask_, Side::Sell, book);
+        clamp(bids_, Side::Buy, book);
+        clamp(asks_, Side::Sell, book);
     }
 
-    // Returns whatever this trade filled of ours. Append-only into `out` so the
-    // caller controls the allocation.
+    // Appends whatever this trade filled of ours. The caller owns the vector so
+    // the hot path does not allocate.
     void on_trade(const Trade& t, std::int64_t ts, std::vector<Fill>& out) {
         // t.hit_bid() means a resting BID was consumed, so it can only touch our
-        // buy order. The trade stream is the only thing that tells us this --
+        // buy orders. The trade stream is the only thing that tells us this --
         // the depth stream alone cannot distinguish a trade from a cancel.
-        apply_trade(t.hit_bid() ? bid_ : ask_, t.hit_bid() ? Side::Buy : Side::Sell, t, ts,
-                    out);
+        const Side side = t.hit_bid() ? Side::Buy : Side::Sell;
+        auto&      live = t.hit_bid() ? bids_ : asks_;
+
+        for (auto& o : live) apply_trade(o, side, t, ts, out);
+
+        live.erase(std::remove_if(live.begin(), live.end(),
+                                  [](const Order& o) { return o.qty <= 0; }),
+                   live.end());
     }
 
 private:
-    Order& order(Side s) { return s == Side::Buy ? bid_ : ask_; }
+    static OrderView view(const std::vector<Order>& live) {
+        if (live.empty()) return OrderView{};
+        return OrderView{live.front().px, live.front().qty, live.front().queue_ahead, true};
+    }
 
-    static void clamp(Order& o, Side side, const OrderBook& book) {
-        if (!o.active) return;
-        o.queue_ahead = std::min(o.queue_ahead, book.size_at(side, o.px));
+    static void clamp(std::vector<Order>& live, Side side, const OrderBook& book) {
+        for (auto& o : live) o.queue_ahead = std::min(o.queue_ahead, book.size_at(side, o.px));
     }
 
     static void apply_trade(Order& o, Side side, const Trade& t, std::int64_t ts,
                             std::vector<Fill>& out) {
-        if (!o.active) return;
+        if (o.qty <= 0) return;
 
         // Trades strictly past our price mean the book swept THROUGH our level.
         // That cannot happen without everything resting there -- us included --
@@ -119,14 +154,13 @@ private:
         const bool swept = side == Side::Buy ? t.px < o.px : t.px > o.px;
         if (swept) {
             out.push_back(Fill{side, o.px, o.qty, ts});
-            o.qty    = 0;
-            o.active = false;
+            o.qty = 0;
             return;
         }
 
-        if (t.px != o.px) return;  // trade at a price that is not ours: irrelevant
+        if (t.px != o.px) return;  // a trade at a price that is not ours
 
-        Qty       remaining = t.qty;
+        Qty       remaining  = t.qty;
         const Qty from_queue = std::min(o.queue_ahead, remaining);
         o.queue_ahead -= from_queue;
         remaining -= from_queue;
@@ -135,12 +169,11 @@ private:
         const Qty filled = std::min(remaining, o.qty);
         o.qty -= filled;
         out.push_back(Fill{side, o.px, filled, ts});
-        if (o.qty == 0) o.active = false;
     }
 
-    Order         bid_;
-    Order         ask_;
-    std::uint64_t placements_ = 0;
+    std::vector<Order> bids_;
+    std::vector<Order> asks_;
+    std::uint64_t      placements_ = 0;
 };
 
 }  // namespace hft

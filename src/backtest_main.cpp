@@ -37,6 +37,8 @@ struct Config {
     bool        breakeven     = false;
     std::int64_t min_requote_ms = 0;
     double      avg_down      = 1.0;
+    double      grid_bp       = 0.0;   // >0 switches to grid quoting
+    int         grid_levels   = 5;
 };
 
 class Backtester {
@@ -45,7 +47,8 @@ public:
         : cfg_(c),
           markout_(c.markout_ms * 1'000'000),
           vol_(0.02),
-          mm_(make_params(c)) {
+          mm_(make_params(c)),
+          grid_(make_grid(c)) {
         if (!c.csv.empty()) {
             csv_ = std::fopen(c.csv.c_str(), "w");
             if (csv_) std::fprintf(csv_, "ts_ns,mid,position,equity,fills\n");
@@ -94,6 +97,18 @@ public:
     std::uint64_t         book_updates() const { return updates_; }
 
 private:
+    static GridParams make_grid(const Config& c) {
+        GridParams g;
+        char b[64];
+        const auto fx = [&b](double v) { std::snprintf(b, sizeof b, "%.8f", v); return *parse_fixed(b); };
+        g.step_bp      = c.grid_bp;
+        g.levels       = c.grid_levels;
+        g.size         = fx(c.size);
+        g.max_position = fx(c.max_position);
+        g.tick         = fx(c.tick);
+        return g;
+    }
+
     static MMParams make_params(const Config& c) {
         MMParams p;
         // std::to_string on a double gives 6 decimals, which is not enough for
@@ -151,11 +166,20 @@ private:
         }
         last_quote_ns_ = ns;
 
-        const Quote q = mm_.quote(book, pf_.position, vol_.sigma(), pf_.avg_entry);
-        const Price threshold = static_cast<Price>(cfg_.requote_ticks * static_cast<double>(mm_.params().tick));
-
-        requote(Side::Buy, q.bid, q.bid_px, threshold, book);
-        requote(Side::Sell, q.ask, q.ask_px, threshold, book);
+        if (cfg_.grid_bp > 0.0) {
+            // Grid: a fixed ladder. replace() keeps every order whose price is
+            // still wanted, so levels that have not moved never lose their
+            // place in the queue.
+            grid_.quote(book, pf_.position, grid_bids_, grid_asks_);
+            sim_.replace(Side::Buy, grid_bids_, book);
+            sim_.replace(Side::Sell, grid_asks_, book);
+        } else {
+            const Quote q = mm_.quote(book, pf_.position, vol_.sigma(), pf_.avg_entry);
+            const Price threshold =
+                static_cast<Price>(cfg_.requote_ticks * static_cast<double>(mm_.params().tick));
+            requote(Side::Buy, q.bid, q.bid_px, threshold, book);
+            requote(Side::Sell, q.ask, q.ask_px, threshold, book);
+        }
 
         if (csv_ && updates_ % 200 == 0) {
             std::fprintf(csv_, "%lld,%.2f,%.6f,%.6f,%llu\n", (long long)ns, *mid,
@@ -185,6 +209,8 @@ private:
     MarkoutTracker     markout_;
     VolEstimator       vol_;
     MarketMaker        mm_;
+    GridMaker          grid_;
+    std::vector<Level> grid_bids_, grid_asks_;
     std::vector<Fill>  fills_;
     std::string        meta_;
     double             last_mid_ = 0.0;
@@ -215,6 +241,8 @@ int main(int argc, char** argv) {
                      "  --breakeven 0|1   never quote an exit below cost basis\n"
                      "  --avg-down F      allow position to grow F-fold while underwater\n"
                      "  --min-requote-ms N  minimum gap between requotes\n"
+                     "  --grid-bp F       grid mode: level spacing in bp (0 = market maker)\n"
+                     "  --grid-levels N   grid mode: levels per side\n"
                      "  --csv PATH        write the P&L curve\n");
         return 2;
     }
@@ -235,6 +263,8 @@ int main(int argc, char** argv) {
         else if (a == "--min-edge-bp") cfg.min_edge_bp = next();
         else if (a == "--breakeven") cfg.breakeven = next() != 0.0;
         else if (a == "--avg-down") cfg.avg_down = next();
+        else if (a == "--grid-bp") cfg.grid_bp = next();
+        else if (a == "--grid-levels") cfg.grid_levels = static_cast<int>(next());
         else if (a == "--min-requote-ms") cfg.min_requote_ms = static_cast<std::int64_t>(next());
         else if (a == "--csv" && i + 1 < argc) cfg.csv = argv[++i];
         else {
@@ -258,9 +288,14 @@ int main(int argc, char** argv) {
 
         std::printf("backtest %s\n", cfg.path.c_str());
         std::printf("  meta          %s\n", bt.meta().c_str());
-        std::printf("  strategy      gamma %.2f   fair %s   half %.1f tick   vol %.2f\n",
-                    cfg.gamma, cfg.microprice ? "microprice" : "mid", cfg.base_half,
-                    cfg.vol_coeff);
+        if (cfg.grid_bp > 0.0) {
+            std::printf("  strategy      GRID   step %.1f bp   %d levels/side   size %g\n",
+                        cfg.grid_bp, cfg.grid_levels, cfg.size);
+        } else {
+            std::printf("  strategy      MM   gamma %.2f   fair %s   half %.1f tick   edge %.2f bp\n",
+                        cfg.gamma, cfg.microprice ? "microprice" : "mid", cfg.base_half,
+                        cfg.min_edge_bp);
+        }
         std::printf("  data          %.1f s   depth %llu   trades %llu   replayed in %.2f s\n",
                     span, (unsigned long long)st.depth, (unsigned long long)st.trades, secs);
         std::printf("\n");

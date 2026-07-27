@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <vector>
 
 namespace hft {
 
@@ -208,6 +209,85 @@ public:
 
 private:
     MMParams p_;
+};
+
+// ---------------------------------------------------------------------------
+// Grid quoting.
+//
+// A different business from the market maker above, and the reason it exists:
+// on BTCUSDT the spread is 0.02bp against a 4bp round-trip fee, so capturing
+// the spread is arithmetically impossible. A grid stops trying. It places a
+// ladder of orders at FIXED prices and profits when price oscillates across
+// them -- each completed round trip earns one grid step, so a 20bp step pays
+// 20bp and costs 4bp.
+//
+// The trade-off is explicit: a market maker tries to stay flat and earns the
+// spread; a grid accepts inventory and earns volatility. It loses when price
+// trends away instead of oscillating, which is the same inventory risk as
+// before -- only now it is the strategy's premise rather than its hazard.
+//
+// THE LEVELS MUST BE FIXED. Anchoring them to the moving mid is the classic
+// mistake: the ladder follows price, a buy level is never revisited from above,
+// and no round trip ever completes. Here levels are snapped to absolute
+// multiples of the step, so they stay put while price moves through them.
+struct GridParams {
+    double step_bp      = 20.0;  // spacing between levels, bp of price
+    int    levels       = 5;     // levels per side
+    Qty    size         = 0;     // per level
+    Qty    max_position = 0;
+    Price  tick         = 0;
+};
+
+class GridMaker {
+public:
+    explicit GridMaker(const GridParams& p) : p_(p) {}
+
+    void quote(const OrderBook& book, Qty position, std::vector<Level>& bids,
+               std::vector<Level>& asks) const {
+        bids.clear();
+        asks.clear();
+
+        const auto bb = book.best_bid();
+        const auto ba = book.best_ask();
+        const auto mid_opt = book.mid();
+        if (!bb || !ba || !mid_opt) return;
+
+        const double mid     = *mid_opt;
+        const Price  step    = std::max(p_.tick, round_step(mid));
+        const Price  mid_fix = static_cast<Price>(mid * static_cast<double>(kScale));
+        const Price  base    = (mid_fix / step) * step;  // grid line at or below mid
+
+        // How many levels we may hang before filling them all would breach the
+        // inventory limit. Enforcing the cap by TRUNCATING THE LADDER rather
+        // than by refusing orders later means the limit holds even if every
+        // resting order fills at once -- which is exactly what happens when
+        // price gaps through the grid.
+        const int room_buy  = static_cast<int>((p_.max_position - position) / p_.size);
+        const int room_sell = static_cast<int>((p_.max_position + position) / p_.size);
+
+        for (int k = 0; k < std::min(p_.levels, room_buy); ++k) {
+            const Price px = base - static_cast<Price>(k) * step;
+            if (px >= ba->px) continue;  // never cross: we are a maker
+            if (px <= 0) break;
+            bids.push_back(Level{px, p_.size});
+        }
+        for (int k = 1; k <= std::min(p_.levels, room_sell); ++k) {
+            const Price px = base + static_cast<Price>(k) * step;
+            if (px <= bb->px) continue;
+            asks.push_back(Level{px, p_.size});
+        }
+    }
+
+    const GridParams& params() const { return p_; }
+
+private:
+    Price round_step(double mid) const {
+        const double raw = mid * p_.step_bp / 10000.0 * static_cast<double>(kScale);
+        const Price  n   = static_cast<Price>(raw / static_cast<double>(p_.tick));
+        return std::max<Price>(1, n) * p_.tick;
+    }
+
+    GridParams p_;
 };
 
 }  // namespace hft

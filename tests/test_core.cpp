@@ -586,6 +586,96 @@ static void test_avg_entry_tracking() {
     CHECK_NEAR(f.avg_entry, 110.0, 1e-9);
 }
 
+static void test_grid_levels_are_fixed() {
+    std::printf("test_grid_levels_are_fixed\n");
+
+    GridParams g;
+    g.tick         = *parse_fixed("0.10");
+    g.size         = *parse_fixed("0.002");
+    g.max_position = *parse_fixed("0.010");
+    g.step_bp      = 20.0;
+    g.levels       = 3;
+
+    OrderBook b1;
+    b1.apply_bid(*parse_fixed("65000.00"), *parse_fixed("10"));
+    b1.apply_ask(*parse_fixed("65000.10"), *parse_fixed("10"));
+
+    std::vector<Level> bids, asks;
+    GridMaker(g).quote(b1, 0, bids, asks);
+    CHECK(!bids.empty());
+    CHECK(!asks.empty());
+
+    // 20bp of 65,000 is 130, rounded to the 0.10 tick -> 130.00.
+    if (bids.size() >= 2) CHECK(bids[0].px - bids[1].px == *parse_fixed("130.00"));
+    if (asks.size() >= 2) CHECK(asks[1].px - asks[0].px == *parse_fixed("130.00"));
+
+    // Every level must be a multiple of the step. THIS is what makes a grid a
+    // grid: if the ladder drifted with the mid, a level bought on the way down
+    // would never be revisited from above and no round trip would ever close.
+    const Price step = *parse_fixed("130.00");
+    for (const auto& l : bids) CHECK(l.px % step == 0);
+    for (const auto& l : asks) CHECK(l.px % step == 0);
+
+    // Move the mid by less than one step: the levels must NOT move.
+    OrderBook b2;
+    b2.apply_bid(*parse_fixed("65040.00"), *parse_fixed("10"));
+    b2.apply_ask(*parse_fixed("65040.10"), *parse_fixed("10"));
+    std::vector<Level> bids2, asks2;
+    GridMaker(g).quote(b2, 0, bids2, asks2);
+    CHECK(bids2[0].px == bids[0].px);
+    CHECK(asks2[0].px == asks[0].px);
+
+    // Ladder length is truncated so that filling EVERY resting order cannot
+    // breach the inventory limit -- which is what happens when price gaps
+    // through the whole grid at once.
+    std::vector<Level> b3, a3;
+    GridMaker(g).quote(b1, *parse_fixed("0.008"), b3, a3);
+    CHECK(static_cast<Qty>(b3.size()) * g.size <= g.max_position - *parse_fixed("0.008"));
+
+    // Quotes must never cross the book.
+    for (const auto& l : bids) CHECK(l.px < b1.best_ask()->px);
+    for (const auto& l : asks) CHECK(l.px > b1.best_bid()->px);
+}
+
+static void test_ladder_keeps_queue_position() {
+    std::printf("test_ladder_keeps_queue_position\n");
+
+    OrderBook book;
+    book.apply_bid(*parse_fixed("100.00"), *parse_fixed("10"));
+    book.apply_bid(*parse_fixed("99.00"), *parse_fixed("20"));
+    book.apply_ask(*parse_fixed("101.00"), *parse_fixed("10"));
+
+    FillSimulator     sim;
+    std::vector<Fill> fills;
+
+    sim.replace(Side::Buy,
+                {Level{*parse_fixed("100.00"), *parse_fixed("1")},
+                 Level{*parse_fixed("99.00"), *parse_fixed("1")}},
+                book);
+    CHECK(sim.resting(Side::Buy) == 2);
+    CHECK(sim.orders(Side::Buy)[0].queue_ahead == *parse_fixed("10"));
+    CHECK(sim.orders(Side::Buy)[1].queue_ahead == *parse_fixed("20"));
+
+    // Work down the queue at 100.00.
+    sim.on_trade(trade_at("100.00", "9", true), 1, fills);
+    CHECK(fills.empty());
+    CHECK(sim.orders(Side::Buy)[0].queue_ahead == *parse_fixed("1"));
+
+    // Re-issuing the SAME ladder must keep both places. A grid that rebuilt its
+    // orders every tick would never reach the front of any level.
+    sim.replace(Side::Buy,
+                {Level{*parse_fixed("100.00"), *parse_fixed("1")},
+                 Level{*parse_fixed("99.00"), *parse_fixed("1")}},
+                book);
+    CHECK(sim.orders(Side::Buy)[0].queue_ahead == *parse_fixed("1"));
+    CHECK(sim.placements() == 2);  // no new placements
+
+    // A trade printing below BOTH levels swept through the whole ladder.
+    sim.on_trade(trade_at("98.50", "50", true), 2, fills);
+    CHECK(fills.size() == 2);
+    CHECK(sim.resting(Side::Buy) == 0);
+}
+
 int main() {
     test_parse_fixed();
     test_order_book();
@@ -604,6 +694,8 @@ int main() {
     test_skew_is_scale_free();
     test_min_edge_and_breakeven();
     test_avg_entry_tracking();
+    test_grid_levels_are_fixed();
+    test_ladder_keeps_queue_position();
     test_quotes_never_cross();
 
     std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
