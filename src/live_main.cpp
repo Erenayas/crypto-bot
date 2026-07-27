@@ -133,6 +133,18 @@ public:
 
         const Side side = position_ > 0 ? Side::Sell : Side::Buy;
         const Qty  qty  = position_ > 0 ? position_ : -position_;
+
+        // A position smaller than the symbol's lot step rounds to "0.000" on
+        // the wire and comes back as -4003. There is nothing to close and no
+        // way to express it, so treat it as flat rather than reporting a
+        // failure that needs manual attention -- crying wolf makes the real
+        // "POSITION STILL OPEN" warning worthless.
+        if (format_fixed(qty, exec_.spec().qty_dp) == format_fixed(0, exec_.spec().qty_dp)) {
+            std::fprintf(stderr, "[exec] residual %s below lot step, treating as flat\n",
+                         format_fixed(qty, 8).c_str());
+            position_ = 0;
+            return;
+        }
         try {
             std::fprintf(stderr, "[exec] flattening %s %s (market, reduce-only)\n",
                          position_ > 0 ? "LONG" : "SHORT",
@@ -175,7 +187,18 @@ private:
         if (o.active && std::llabs(o.px - px) < mm_.params().tick) return;
 
         const std::int64_t t = now_ms();
-        const RiskVerdict  v = risk_.check(side, mm_.params().size, position_, t, book_ms);
+        // Check against the WORST CASE position, not the last polled one.
+        //
+        // Without a user-data stream we only learn our position from a poll
+        // every few seconds, and fills happen in between. A live run breached a
+        // 0.0040 limit by 2.2x for exactly this reason: the gate was reasoning
+        // about a number that was already stale.
+        //
+        // So we assume any order still resting has already filled. That is
+        // pessimistic and will occasionally block a legal quote -- which is the
+        // correct direction to be wrong in for a risk check.
+        const RiskVerdict v =
+            risk_.check(side, mm_.params().size, worst_case_position(), t, book_ms);
         if (v != RiskVerdict::Allow) {
             ++rejected_;
             log_reject(side, v);
@@ -204,11 +227,26 @@ private:
         } catch (const std::exception& e) {
             // A GTX rejection is NORMAL: the book moved and our "passive" price
             // would now cross. That is the protection working, not a failure.
+            // A GTX rejection is the protection working: the book moved and
+            // our passive price would now cross. Counted, not logged -- at a
+            // 40% reject rate the log would be nothing else.
             ++rejected_;
-            std::fprintf(stderr, "[exec] place %s rejected: %s\n",
-                         side == Side::Buy ? "BID" : "ASK", e.what());
+            const std::string msg = e.what();
+            if (msg.find("-5022") == std::string::npos) {
+                std::fprintf(stderr, "[exec] place %s rejected: %s\n",
+                             side == Side::Buy ? "BID" : "ASK", msg.c_str());
+            }
             o.active = false;
         }
+    }
+
+    // Position we would hold if every resting order filled right now.
+    Qty worst_case_position() const {
+        // Take whichever direction is closer to a limit, so neither side can
+        // sneak past while we reason about the other.
+        const Qty long_case  = position_ + (bid_.active ? mm_.params().size : 0);
+        const Qty short_case = position_ - (ask_.active ? mm_.params().size : 0);
+        return std::llabs(long_case) >= std::llabs(short_case) ? long_case : short_case;
     }
 
     void cancel(Side side, LiveOrder& o) {
@@ -216,9 +254,15 @@ private:
             try {
                 exec_.cancel(o.id, now_ms());
             } catch (const std::exception& e) {
-                // Already filled or already gone. Either way it is not resting.
-                std::fprintf(stderr, "[exec] cancel %s: %s\n",
-                             side == Side::Buy ? "BID" : "ASK", e.what());
+                // -2011 "Unknown order sent" means the order already filled or
+                // was already gone. That is the NORMAL outcome of racing a
+                // cancel against a fill, not a fault, so it is not worth a line
+                // of log. Anything else is.
+                const std::string msg = e.what();
+                if (msg.find("-2011") == std::string::npos) {
+                    std::fprintf(stderr, "[exec] cancel %s: %s\n",
+                                 side == Side::Buy ? "BID" : "ASK", msg.c_str());
+                }
             }
         }
         o = LiveOrder{};
@@ -460,7 +504,11 @@ int main(int argc, char** argv) {
                 trader.on_book(sync.book(), vol.sigma(), now_ms());
 
                 const auto now = std::chrono::steady_clock::now();
-                if (live && now - last_poll > std::chrono::seconds(5)) {
+                // Poll often. Every second between polls is a second the risk
+                // gate spends reasoning about a stale position. The real fix is
+                // the user-data stream (listenKey), which delivers fills as they
+                // happen; this is the pragmatic version of it.
+                if (live && now - last_poll > std::chrono::seconds(1)) {
                     last_poll = now;
                     trader.set_position(poll_position(exec));
                 }

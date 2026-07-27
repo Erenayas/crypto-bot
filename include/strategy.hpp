@@ -71,6 +71,12 @@ struct MMParams {
     // the round-trip fee. See the warning in quote().
     bool   breakeven_exit  = false;
     double fee_bp          = 2.0;   // maker fee PER SIDE, for the breakeven line
+
+    // Averaging down. >1 lets the position grow to (max_position * this) while
+    // it is UNDERWATER, and switches off the inventory skew so we keep quoting
+    // the side that adds to it -- "buy more cheaply to improve the average".
+    // 1.0 disables it. See the warning in quote(); it is off for a reason.
+    double avg_down_mult   = 1.0;
 };
 
 // The quoting strategy.
@@ -112,8 +118,32 @@ public:
         const double fair = *fair_opt;
 
         const double tick_px = to_double(p_.tick);
-        const double q_norm =
-            static_cast<double>(position) / static_cast<double>(p_.max_position);
+
+        // AVERAGING DOWN.
+        //
+        // The idea: the position is losing, we still have balance, so add more
+        // at a better price and improve the average entry.
+        //
+        // What it actually does: increases exposure precisely when the market
+        // is disagreeing with the position, and switches OFF the one mechanism
+        // (inventory skew) whose entire job is to stop that happening. The
+        // "improved average" is an accounting illusion -- the average moved
+        // because the SIZE grew, and the total money at risk grew with it.
+        //
+        // It converts a small, certain, closable loss into a small probability
+        // of a very large one. Most days it looks like it works, which is what
+        // makes it dangerous. Measured in docs/04.
+        Qty    max_pos = p_.max_position;
+        double gamma   = p_.gamma;
+        if (p_.avg_down_mult > 1.0 && position != 0 && avg_entry > 0.0) {
+            const bool underwater = position > 0 ? (fair < avg_entry) : (fair > avg_entry);
+            if (underwater) {
+                max_pos = static_cast<Qty>(static_cast<double>(p_.max_position) * p_.avg_down_mult);
+                gamma   = 0.0;  // stop skewing away from the losing position
+            }
+        }
+
+        const double q_norm = static_cast<double>(position) / static_cast<double>(max_pos);
 
         // Inventory skew, expressed in TICKS.
         //
@@ -126,7 +156,7 @@ public:
         // Scaling by the TICK instead keeps gamma meaningful and independent of
         // the instrument's price scale: gamma is "how many ticks to shift the
         // quotes when inventory is at its limit".
-        const double reservation = fair - q_norm * p_.gamma * tick_px;
+        const double reservation = fair - q_norm * gamma * tick_px;
 
         double half = (p_.base_half_ticks * tick_px) + (p_.vol_coeff * sigma);
 
@@ -167,8 +197,8 @@ public:
         // Hard inventory limits. Beyond them we quote only the side that
         // reduces the position -- the skew above is a preference, this is a
         // constraint, and a market maker needs both.
-        q.bid    = position < p_.max_position;
-        q.ask    = position > -p_.max_position;
+        q.bid    = position < max_pos;
+        q.ask    = position > -max_pos;
         q.bid_px = bid_px;
         q.ask_px = ask_px;
         return q;

@@ -312,7 +312,52 @@ closable loss becomes an open-ended one. "Never take a loss" is the mechanism by
 which small losses become large ones — and `time in market` is the column where
 it shows up first, which is why the backtester now reports it.
 
-### The other trap: quoting more slowly
+### The third trap: averaging down
+
+> *"If the position is going to lose — say we bet on a fall and it rose — we
+> still have balance. Could we add a bit and improve the entry level?"*
+
+Implemented as `--avg-down F`: while the position is underwater, let it grow to
+`F ×` the normal limit and switch **off** the inventory skew, so we keep quoting
+the side that adds to it.
+
+| multiplier | fills | net (bp) | max long | time holding inventory |
+|---|---|---|---|---|
+| **off** | 241 | **−2.318** | **0.0040** | 64% |
+| 2× | 152 | −3.092 | 0.0080 | 87% |
+| 3× | 147 | −3.712 | 0.0120 | 88% |
+| 5× | 152 | −4.652 | 0.0200 | 88% |
+| 10× | 191 | −4.001 | 0.0400 | 88% |
+
+Monotonically worse, and **peak position grows exactly in step with the
+multiplier** — 0.0040 to 0.0400. That second column is the whole story: the
+multiplier is not a P&L parameter, it is a *risk* parameter, and it does what it
+says.
+
+Three things are wrong with the idea, in increasing order of importance:
+
+1. **It buys more precisely when the market is disagreeing with you.** The
+   position is underwater because price moved against it. Adding is a bet that
+   the move was noise, taken at the moment you have the least evidence for that.
+2. **It switches off the only mechanism built to prevent this.** A-S inventory
+   skew exists to quote *away* from a growing position. Averaging down inverts
+   it — precisely backwards from the model the rest of the strategy implements.
+3. **The improved average is an accounting illusion.** The average entry moved
+   because the *size* grew. Money at risk went up, not down. A position at a
+   better average and triple the size is a worse position.
+
+**And the backtest understates the danger.** Fifteen minutes cannot show what
+averaging down does, because its failure mode is a tail: it looks fine on most
+samples and then loses everything on one. That it is already worse on a sample
+where it had every chance to look good is damning; a longer sample would not be
+kinder.
+
+The honest framing: `max_position` is the promise that a bad run cannot take the
+account. Averaging down is a rule whose entire purpose is to break that promise
+when it feels most reasonable to. It is implemented so it could be measured, and
+it stays off.
+
+### The fourth trap: quoting more slowly
 
 | min gap between requotes | fills | net (bp) | markout |
 |---|---|---|---|

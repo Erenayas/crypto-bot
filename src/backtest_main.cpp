@@ -36,6 +36,7 @@ struct Config {
     double      min_edge_bp   = 1.25;  // measured optimum, docs/04 section 8
     bool        breakeven     = false;
     std::int64_t min_requote_ms = 0;
+    double      avg_down      = 1.0;
 };
 
 class Backtester {
@@ -105,6 +106,7 @@ private:
         p.min_edge_bp     = c.min_edge_bp;
         p.breakeven_exit  = c.breakeven;
         p.fee_bp          = c.maker_fee * 10000.0;
+        p.avg_down_mult   = c.avg_down;
         return p;
     }
 
@@ -203,6 +205,7 @@ int main(int argc, char** argv) {
                      "  --requote F       requote threshold in ticks\n"
                      "  --min-edge-bp F   minimum half-spread, in bp of price\n"
                      "  --breakeven 0|1   never quote an exit below cost basis\n"
+                     "  --avg-down F      allow position to grow F-fold while underwater\n"
                      "  --min-requote-ms N  minimum gap between requotes\n"
                      "  --csv PATH        write the P&L curve\n");
         return 2;
@@ -222,6 +225,7 @@ int main(int argc, char** argv) {
         else if (a == "--markout-ms") cfg.markout_ms = static_cast<std::int64_t>(next());
         else if (a == "--min-edge-bp") cfg.min_edge_bp = next();
         else if (a == "--breakeven") cfg.breakeven = next() != 0.0;
+        else if (a == "--avg-down") cfg.avg_down = next();
         else if (a == "--min-requote-ms") cfg.min_requote_ms = static_cast<std::int64_t>(next());
         else if (a == "--csv" && i + 1 < argc) cfg.csv = argv[++i];
         else {
